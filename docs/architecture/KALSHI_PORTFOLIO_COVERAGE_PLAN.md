@@ -31,7 +31,7 @@ Fills deduplicate by provider `fill_id` and require exact modeled equality. Dive
 
 Canonical JSON writes every `Decimal` as a fixed string and preserves provider timestamp strings exactly. Order observation identity is `(principal_fingerprint, order_id, evidence_hash)`, allowing content-addressed immutable snapshots without copying every payload into every run. Fill observations and checkpoints are likewise principal-scoped. Checkpoints reference evidence through a deterministic SHA-256 over sorted `(identity, evidence_hash)` pairs.
 
-The existing venue-neutral intent ledger does not yet carry authenticated-principal identity. This increment therefore treats every observed order, client-order ID, and fill as unknown instead of correlating across credentials and suppressing an operator-visible warning. Principal-bound local correlation remains a later ledger migration.
+The venue-neutral intent ledger now supports an optional authenticated-principal fingerprint. A sweep suppresses an observed identity from the unknown lists only when exact principal-bound intent, acknowledgement, immutable order facts, and fill-event ownership agree. Unbound and conflicting evidence remains unknown. See `KALSHI_PRINCIPAL_BOUND_LEDGER_CORRELATION_PLAN.md`.
 
 The checkpoint evidence hash is an **observation identity**, not proof of a reproducible or transactional snapshot.
 

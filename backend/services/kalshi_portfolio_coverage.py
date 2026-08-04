@@ -19,6 +19,7 @@ from decimal import Decimal
 from fractions import Fraction
 from typing import Literal, Protocol
 
+from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import sessionmaker
@@ -28,6 +29,9 @@ from models.database import (
     KalshiPortfolioFillObservation,
     KalshiPortfolioOrderIdentity,
     KalshiPortfolioOrderObservation,
+    VenueExecutionEvent,
+    VenueOrderIntentRecord,
+    VenueProviderAcknowledgementRecord,
 )
 from services.venues.kalshi_v2 import (
     KalshiFill,
@@ -181,12 +185,10 @@ class KalshiPortfolioCoverageService:
             ):
                 incomplete_reasons.append(f"fill_count_mismatch:{order_id}")
 
-        # The venue-neutral execution ledger is not yet bound to an authenticated
-        # principal. Treat every venue identity as unknown rather than correlating
-        # activity across credentials and suppressing an operator-visible warning.
-        unknown_order_ids = tuple(sorted(orders))
-        unknown_client_order_ids = tuple(sorted({order.client_order_id for order in orders.values()}))
-        unknown_fill_ids = tuple(sorted(fills))
+        known_orders, known_fills = await self._known_local_evidence(principal_fingerprint, orders, fills)
+        unknown_order_ids = tuple(sorted(set(orders) - known_orders))
+        unknown_client_order_ids = tuple(sorted({orders[order_id].client_order_id for order_id in unknown_order_ids}))
+        unknown_fill_ids = tuple(sorted(set(fills) - known_fills))
 
         order_payloads = {order_id: _order_payload(order) for order_id, order in orders.items()}
         fill_payloads = {fill_id: _fill_payload(fill) for fill_id, fill in fills.items()}
@@ -324,6 +326,69 @@ class KalshiPortfolioCoverageService:
                 KalshiPortfolioCoverageCheckpoint,
                 {"principal_fingerprint": principal_fingerprint, "coverage_id": coverage_id},
             )
+
+    async def _known_local_evidence(
+        self,
+        principal_fingerprint: str,
+        orders: dict[str, KalshiOrder],
+        fills: dict[str, KalshiFill],
+    ) -> tuple[set[str], set[str]]:
+        if not orders:
+            return set(), set()
+        async with self._session_factory() as session:
+            rows = (
+                await session.execute(
+                    select(VenueOrderIntentRecord, VenueProviderAcknowledgementRecord)
+                    .join(
+                        VenueProviderAcknowledgementRecord,
+                        VenueProviderAcknowledgementRecord.intent_id == VenueOrderIntentRecord.id,
+                    )
+                    .where(
+                        VenueOrderIntentRecord.venue == "kalshi",
+                        VenueOrderIntentRecord.authenticated_principal_fingerprint == principal_fingerprint,
+                        VenueOrderIntentRecord.authenticated_principal_fingerprint.is_not(None),
+                        VenueProviderAcknowledgementRecord.provider_order_id.in_(set(orders)),
+                    )
+                )
+            ).all()
+
+            known_order_owners: dict[str, str] = {}
+            for intent, acknowledgement in rows:
+                order = orders.get(acknowledgement.provider_order_id)
+                if order is None or order.client_order_id != intent.client_order_id:
+                    continue
+                effective_price = order.yes_price if order.book_side == "bid" else order.no_price
+                if (
+                    order.ticker != intent.instrument_id
+                    or order.book_side != intent.book_side
+                    or order.order_type != "limit"
+                    or order.initial_count != intent.quantity
+                    or effective_price != intent.limit_price
+                ):
+                    continue
+                known_order_owners[order.order_id] = intent.id
+
+            if not known_order_owners or not fills:
+                return set(known_order_owners), set()
+            events = (
+                await session.execute(
+                    select(VenueExecutionEvent).where(
+                        VenueExecutionEvent.venue == "kalshi",
+                        VenueExecutionEvent.event_type == "fill_observed",
+                        VenueExecutionEvent.intent_id.in_(set(known_order_owners.values())),
+                        VenueExecutionEvent.provider_event_id.in_(set(fills)),
+                    )
+                )
+            ).scalars()
+            known_fills = {
+                event.provider_event_id
+                for event in events
+                if event.provider_event_id is not None
+                and event.provider_order_id in known_order_owners
+                and known_order_owners[event.provider_order_id] == event.intent_id
+                and fills[event.provider_event_id].order_id == event.provider_order_id
+            }
+            return set(known_order_owners), known_fills
 
     async def _traverse(self, source: str, getter, **fixed_kwargs: object) -> _Traversal:
         cursor: str | None = None

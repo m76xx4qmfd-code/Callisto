@@ -289,6 +289,229 @@ async def test_unscoped_local_ledger_cannot_suppress_unknown_principal_activity(
 
 @pytest.mark.db
 @pytest.mark.asyncio
+async def test_exact_principal_bound_acknowledged_order_and_fill_are_known() -> None:
+    engine, session_factory = await build_postgres_session_factory(Base, "kalshi_portfolio_coverage_bound_known")
+    try:
+        async with session_factory() as session, session.begin():
+            ledger = VenueExecutionLedger(session)
+            intent = await ledger.record_intent(
+                VenueOrderIntent(
+                    venue="kalshi",
+                    instrument_id="HIGHNY-24JAN01-T60",
+                    client_order_id="unknown-client",
+                    book_side="bid",
+                    quantity=Decimal(2),
+                    limit_price=Decimal("0.56"),
+                    time_in_force="good_till_canceled",
+                    post_only=False,
+                ),
+                VenueIntentProvenance(
+                    source="test",
+                    authenticated_principal_fingerprint="a" * 64,
+                ),
+            )
+            await ledger.record_initial_acknowledgement(
+                intent.id,
+                VenueInitialAcknowledgement(
+                    venue="kalshi",
+                    client_order_id="unknown-client",
+                    provider_order_id="order-1",
+                    provider_status="resting",
+                    filled_quantity=Decimal(0),
+                    remaining_quantity=Decimal(2),
+                    provider_timestamp=datetime(2026, 8, 4, 10, tzinfo=UTC),
+                    payload={},
+                ),
+            )
+            await ledger.record_event(
+                intent.id,
+                event_type="fill_observed",
+                source="test",
+                dedupe_key="fill_observed:order-1:fill-1",
+                provider_order_id="order-1",
+                provider_event_id="fill-1",
+                occurred_at=datetime(2026, 8, 4, 10, 30, tzinfo=UTC),
+                payload={},
+            )
+
+        result = await KalshiPortfolioCoverageService(
+            session_factory,
+            FakeCoverageClient(
+                current_orders={None: KalshiOrdersPage(orders=(_order(),), cursor="")},
+                current_fills={None: KalshiFillsPage(fills=(_fill(),), cursor="")},
+            ),
+        ).sweep("coverage-bound-known", datetime(2026, 8, 4, 12, tzinfo=UTC))
+
+        assert result.status == "complete"
+        assert result.unknown_order_ids == ()
+        assert result.unknown_client_order_ids == ()
+        assert result.unknown_fill_ids == ()
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.db
+@pytest.mark.asyncio
+async def test_principal_bound_fill_without_exact_ledger_event_remains_unknown() -> None:
+    engine, session_factory = await build_postgres_session_factory(Base, "kalshi_portfolio_coverage_fill_unknown")
+    try:
+        async with session_factory() as session, session.begin():
+            ledger = VenueExecutionLedger(session)
+            intent = await ledger.record_intent(
+                VenueOrderIntent(
+                    venue="kalshi",
+                    instrument_id="HIGHNY-24JAN01-T60",
+                    client_order_id="unknown-client",
+                    book_side="bid",
+                    quantity=Decimal(2),
+                    limit_price=Decimal("0.56"),
+                ),
+                VenueIntentProvenance(source="test", authenticated_principal_fingerprint="a" * 64),
+            )
+            await ledger.record_initial_acknowledgement(
+                intent.id,
+                VenueInitialAcknowledgement(
+                    venue="kalshi",
+                    client_order_id="unknown-client",
+                    provider_order_id="order-1",
+                    provider_status="resting",
+                    filled_quantity=Decimal(0),
+                    remaining_quantity=Decimal(2),
+                    provider_timestamp=datetime(2026, 8, 4, 10, tzinfo=UTC),
+                ),
+            )
+
+        result = await KalshiPortfolioCoverageService(
+            session_factory,
+            FakeCoverageClient(
+                current_orders={None: KalshiOrdersPage(orders=(_order(),), cursor="")},
+                current_fills={None: KalshiFillsPage(fills=(_fill(),), cursor="")},
+            ),
+        ).sweep("coverage-fill-unknown", datetime(2026, 8, 4, 12, tzinfo=UTC))
+
+        assert result.unknown_order_ids == ()
+        assert result.unknown_fill_ids == ("fill-1",)
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.db
+@pytest.mark.asyncio
+async def test_fill_event_for_another_known_order_does_not_suppress_unknown_fill() -> None:
+    engine, session_factory = await build_postgres_session_factory(Base, "kalshi_portfolio_coverage_cross_order_fill")
+    try:
+        async with session_factory() as session, session.begin():
+            ledger = VenueExecutionLedger(session)
+            intents = []
+            for client_order_id, provider_order_id in (("client-1", "order-1"), ("client-2", "order-2")):
+                intent = await ledger.record_intent(
+                    VenueOrderIntent(
+                        venue="kalshi",
+                        instrument_id="HIGHNY-24JAN01-T60",
+                        client_order_id=client_order_id,
+                        book_side="bid",
+                        quantity=Decimal(2),
+                        limit_price=Decimal("0.56"),
+                    ),
+                    VenueIntentProvenance(source="test", authenticated_principal_fingerprint="a" * 64),
+                )
+                await ledger.record_initial_acknowledgement(
+                    intent.id,
+                    VenueInitialAcknowledgement(
+                        venue="kalshi",
+                        client_order_id=client_order_id,
+                        provider_order_id=provider_order_id,
+                        provider_status="resting",
+                        filled_quantity=Decimal(0),
+                        remaining_quantity=Decimal(2),
+                        provider_timestamp=datetime(2026, 8, 4, 10, tzinfo=UTC),
+                    ),
+                )
+                intents.append(intent)
+            await ledger.record_event(
+                intents[1].id,
+                event_type="fill_observed",
+                source="test",
+                dedupe_key="fill_observed:order-2:fill-1",
+                provider_order_id="order-2",
+                provider_event_id="fill-1",
+                occurred_at=datetime(2026, 8, 4, 10, 30, tzinfo=UTC),
+            )
+
+        result = await KalshiPortfolioCoverageService(
+            session_factory,
+            FakeCoverageClient(
+                current_orders={
+                    None: KalshiOrdersPage(
+                        orders=(
+                            _order(order_id="order-1", client_order_id="client-1"),
+                            _order(order_id="order-2", client_order_id="client-2"),
+                        ),
+                        cursor="",
+                    )
+                },
+                current_fills={None: KalshiFillsPage(fills=(_fill(order_id="order-1"),), cursor="")},
+            ),
+        ).sweep("coverage-cross-order-fill", datetime(2026, 8, 4, 12, tzinfo=UTC))
+
+        assert result.unknown_order_ids == ()
+        assert result.unknown_fill_ids == ("fill-1",)
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.db
+@pytest.mark.asyncio
+@pytest.mark.parametrize("bound_fingerprint,with_ack", [("b" * 64, True), ("a" * 64, False)])
+async def test_cross_principal_or_unacknowledged_intent_remains_unknown(
+    bound_fingerprint: str,
+    with_ack: bool,
+) -> None:
+    engine, session_factory = await build_postgres_session_factory(Base, "kalshi_portfolio_coverage_not_known")
+    try:
+        async with session_factory() as session, session.begin():
+            ledger = VenueExecutionLedger(session)
+            intent = await ledger.record_intent(
+                VenueOrderIntent(
+                    venue="kalshi",
+                    instrument_id="HIGHNY-24JAN01-T60",
+                    client_order_id="unknown-client",
+                    book_side="bid",
+                    quantity=Decimal(2),
+                    limit_price=Decimal("0.56"),
+                ),
+                VenueIntentProvenance(
+                    source="test",
+                    authenticated_principal_fingerprint=bound_fingerprint,
+                ),
+            )
+            if with_ack:
+                await ledger.record_initial_acknowledgement(
+                    intent.id,
+                    VenueInitialAcknowledgement(
+                        venue="kalshi",
+                        client_order_id="unknown-client",
+                        provider_order_id="order-1",
+                        provider_status="resting",
+                        filled_quantity=Decimal(0),
+                        remaining_quantity=Decimal(2),
+                        provider_timestamp=datetime(2026, 8, 4, 10, tzinfo=UTC),
+                    ),
+                )
+
+        result = await KalshiPortfolioCoverageService(
+            session_factory,
+            FakeCoverageClient(current_orders={None: KalshiOrdersPage(orders=(_order(),), cursor="")}),
+        ).sweep(f"coverage-not-known-{bound_fingerprint[0]}-{with_ack}", datetime(2026, 8, 4, 12, tzinfo=UTC))
+
+        assert result.unknown_order_ids == ("order-1",)
+        assert result.unknown_client_order_ids == ("unknown-client",)
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.db
+@pytest.mark.asyncio
 async def test_provider_and_client_id_from_different_intents_remain_unknown() -> None:
     engine, session_factory = await build_postgres_session_factory(Base, "kalshi_portfolio_coverage_cross_identity")
     try:
@@ -305,7 +528,7 @@ async def test_provider_and_client_id_from_different_intents_remain_unknown() ->
                     time_in_force="good_till_canceled",
                     post_only=False,
                 ),
-                VenueIntentProvenance(source="test"),
+                VenueIntentProvenance(source="test", authenticated_principal_fingerprint="a" * 64),
             )
             second = await ledger.record_intent(
                 VenueOrderIntent(
@@ -318,7 +541,7 @@ async def test_provider_and_client_id_from_different_intents_remain_unknown() ->
                     time_in_force="good_till_canceled",
                     post_only=False,
                 ),
-                VenueIntentProvenance(source="test"),
+                VenueIntentProvenance(source="test", authenticated_principal_fingerprint="a" * 64),
             )
             assert first.id != second.id
             await ledger.record_initial_acknowledgement(

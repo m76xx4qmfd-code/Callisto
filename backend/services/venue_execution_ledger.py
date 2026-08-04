@@ -7,6 +7,7 @@ Callers own the transaction. A future execution boundary must commit an intent a
 
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -41,11 +42,15 @@ class VenueIntentProvenance:
     strategy_key: str | None = None
     strategy_version: int | None = None
     trace_id: str | None = None
+    authenticated_principal_fingerprint: str | None = None
 
     def __post_init__(self) -> None:
         source = self.source.strip()
         if not source:
             raise ValueError("provenance source is required")
+        fingerprint = self.authenticated_principal_fingerprint
+        if fingerprint is not None and re.fullmatch(r"[0-9a-f]{64}", fingerprint) is None:
+            raise ValueError("authenticated principal fingerprint must be a lowercase SHA-256")
         object.__setattr__(self, "source", source)
 
 
@@ -120,6 +125,7 @@ class VenueExecutionLedger:
             "strategy_key": _optional_text(provenance.strategy_key),
             "strategy_version": provenance.strategy_version,
             "trace_id": _optional_text(provenance.trace_id),
+            "authenticated_principal_fingerprint": provenance.authenticated_principal_fingerprint,
             "created_at": datetime.now(timezone.utc),
         }
         inserted_id = await self._session.scalar(
@@ -400,6 +406,7 @@ def _intent_matches(record: VenueOrderIntentRecord, values: Mapping[str, Any]) -
         "strategy_key",
         "strategy_version",
         "trace_id",
+        "authenticated_principal_fingerprint",
     )
     return all(getattr(record, field_name) == values[field_name] for field_name in fields)
 
