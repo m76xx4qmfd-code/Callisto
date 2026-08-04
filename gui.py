@@ -120,10 +120,10 @@ def _acquire_single_instance_guard() -> bool:
 
 
 def _notify_existing_instance() -> None:
-    message = "Homerun is already running. Close the existing window before launching another copy."
+    message = "Callisto is already running. Close the existing window before launching another copy."
     if sys.platform == "win32":
         try:
-            ctypes.windll.user32.MessageBoxW(None, message, "Homerun", 0x00000040)
+            ctypes.windll.user32.MessageBoxW(None, message, "Callisto", 0x00000040)
             return
         except Exception:
             pass
@@ -647,8 +647,8 @@ def format_log_line(line: str, tag: str) -> tuple[str, str]:
 # ---------------------------------------------------------------------------
 # Main GUI Application
 # ---------------------------------------------------------------------------
-class HomerunApp:
-    """Homerun Trading Platform – tkinter desktop launcher."""
+class CallistoApp:
+    """Callisto prediction-market platform desktop launcher."""
 
     def __init__(self) -> None:
         # Process handles
@@ -2524,7 +2524,7 @@ def main() -> None:
     sys.excepthook = _unhandled_exception_hook
     threading.excepthook = _thread_exception_hook
 
-    app = HomerunApp()
+    app = CallistoApp()
     app.run()
 
 

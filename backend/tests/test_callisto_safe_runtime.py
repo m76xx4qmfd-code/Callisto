@@ -5,6 +5,8 @@ import sys
 from pathlib import Path
 from unittest.mock import AsyncMock
 
+import pytest
+
 BACKEND_ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -88,3 +90,95 @@ def test_legacy_polymarket_service_is_hard_disabled_before_credentials() -> None
     assert asyncio.run(service.initialize()) is False
     assert service.get_last_init_error() == "legacy_polymarket_execution_disabled_in_callisto"
     credential_lookup.assert_not_awaited()
+
+    # Even stale or externally injected client state cannot bypass Callisto's
+    # non-configurable legacy-execution boundary.
+    service._initialized = True
+    service._client = object()
+    assert service.is_ready() is False
+
+
+def test_legacy_live_mutation_router_is_not_mounted() -> None:
+    import main
+
+    paths = set(main.app.openapi().get("paths", {}))
+    assert "/api/trader-orchestrator/live/initialize" not in paths
+    assert "/api/trader-orchestrator/live/orders" not in paths
+    assert "/api/trader-orchestrator/live/execute-opportunity" not in paths
+
+
+@pytest.mark.asyncio
+async def test_api_readiness_is_behaviorally_ready_without_optional_planes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import main
+    from services import redis_client, trader_events_bridge, wallet_state_bus
+
+    class SessionContext:
+        async def __aenter__(self):
+            return object()
+
+        async def __aexit__(self, exc_type, exc, traceback):
+            return False
+
+    monkeypatch.setattr(main, "AsyncSessionLocal", SessionContext)
+    monkeypatch.setattr(
+        main.shared_state,
+        "get_scanner_status_from_db",
+        AsyncMock(return_value={"running": False}),
+    )
+    monkeypatch.setattr(
+        redis_client,
+        "status_snapshot",
+        lambda: {"enabled": True, "healthy": False, "error": "offline"},
+    )
+    monkeypatch.setattr(wallet_state_bus, "status_snapshot", lambda: {"healthy": False})
+    monkeypatch.setattr(trader_events_bridge, "status_snapshot", lambda: {"healthy": False})
+
+    response = await main.readiness_check()
+
+    assert response["status"] == "ready"
+    assert response["execution"] == "disabled"
+    assert response["checks"]["database"] is True
+    assert response["checks"]["scanner"] is False
+    assert response["checks"]["redis"] is False
+
+
+def test_worker_plane_configs_have_no_legacy_execution_switch() -> None:
+    from workers.host import _PLANE_CONFIGS
+
+    assert all("initialize_live_execution" not in config for config in _PLANE_CONFIGS.values())
+
+
+@pytest.mark.asyncio
+async def test_live_manual_buy_fails_before_executor_access(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from fastapi import HTTPException
+
+    from api import routes_traders
+
+    monkeypatch.setattr(routes_traders, "_assert_not_globally_paused", lambda: None)
+    monkeypatch.setattr(
+        routes_traders,
+        "get_trader",
+        AsyncMock(return_value={"id": "trader-1", "mode": "live"}),
+    )
+    place_order = AsyncMock(side_effect=AssertionError("executor must not be called"))
+    monkeypatch.setattr(routes_traders.live_execution_service, "place_order", place_order)
+    request = routes_traders.TraderManualBuyRequest(
+        positions=[
+            routes_traders.ManualBuyPosition(
+                token_id="legacy-token",
+                price=0.5,
+            )
+        ],
+        size_usd=10,
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        await routes_traders.manual_buy("trader-1", request, object())
+
+    assert exc_info.value.status_code == 409
+    assert "unavailable in Callisto" in str(exc_info.value.detail)
+    place_order.assert_not_awaited()

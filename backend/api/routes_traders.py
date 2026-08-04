@@ -57,12 +57,7 @@ from services.trader_orchestrator_state import (
     transfer_open_trades,
     update_trader,
 )
-from services.live_execution_service import (
-    live_execution_service,
-    OrderSide,
-    OrderType,
-    OrderStatus,
-)
+from services.live_execution_service import live_execution_service
 from utils.converters import normalize_market_id, to_iso
 from utils.market_urls import infer_market_platform
 from utils.logger import get_logger
@@ -2272,31 +2267,10 @@ async def manual_buy(
         error_message = None
 
         if mode == "live":
-            if not live_execution_service.is_ready():
-                raise HTTPException(status_code=400, detail="Live trading service not initialized")
-            try:
-                side = OrderSide(side_str)
-            except ValueError:
-                side = OrderSide.BUY
-            live_order = await live_execution_service.place_order(
-                token_id=pos.token_id,
-                side=side,
-                price=pos.price,
-                size=size_shares,
-                order_type=OrderType.GTC,
-                market_question=pos.market_question or None,
+            raise HTTPException(
+                status_code=409,
+                detail="Live trader orders are unavailable in Callisto",
             )
-            if live_order.status == OrderStatus.FAILED:
-                order_status = "failed"
-                error_message = live_order.error_message
-            else:
-                order_status = "executed"
-            live_order_result = {
-                "order_id": live_order.id,
-                "status": str(live_order.status),
-                "size": live_order.size,
-                "price": live_order.price,
-            }
 
         row = TraderOrder(
             id=order_id,
