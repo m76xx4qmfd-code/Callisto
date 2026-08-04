@@ -365,7 +365,7 @@ cleanup_stale_homerun_processes() {
         kill -9 "$pid" 2>/dev/null && killed=$((killed + 1)) || true
     done
     if [ "$killed" -gt 0 ]; then
-        echo -e "${YELLOW}Cleaned up ${killed} stale Homerun process(es) from a previous run.${NC}"
+        echo -e "${YELLOW}Cleaned up ${killed} stale Callisto process(es) from a previous run.${NC}"
         sleep 1
     fi
 }
@@ -523,13 +523,9 @@ PY
 
 # Show banner before any pre-flight output
 echo ""
-echo -e "\033[38;2;30;107;69m    ██   ██  ██████  ███    ███ ███████ ██████  ██    ██ ███    ██\033[0m"
-echo -e "\033[38;2;35;138;85m    ██   ██ ██    ██ ████  ████ ██      ██   ██ ██    ██ ████   ██\033[0m"
-echo -e "\033[38;2;42;172;104m    ███████ ██    ██ ██ ████ ██ █████   ██████  ██    ██ ██ ██  ██\033[0m"
-echo -e "\033[38;2;53;212;122m    ██   ██ ██    ██ ██  ██  ██ ██      ██   ██ ██    ██ ██  ██ ██\033[0m"
-echo -e "\033[38;2;88;241;193m    ██   ██  ██████  ██      ██ ███████ ██   ██  ██████  ██   ████\033[0m"
+echo -e "\033[38;2;30;107;69m                     C  A  L  L  I  S  T  O\033[0m"
 echo ""
-echo -e "${DIM}                    Autonomous Trading Platform${NC}"
+echo -e "${DIM}           Kalshi-first research and paper-trading platform${NC}"
 echo -e "${DIM}    ─────────────────────────────────────────────────────────────────${NC}"
 echo ""
 

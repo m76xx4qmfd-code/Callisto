@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -90,6 +91,26 @@ def test_lifespan_is_async_context_manager() -> None:
 
     lifespan = main.app.router.lifespan_context
     assert callable(lifespan), "app.router.lifespan_context must be callable"
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="macOS OpenMP regression")
+def test_macos_main_and_torch_share_a_safe_native_runtime() -> None:
+    """FAISS and PyTorch must never load competing vendored libomp copies."""
+    proc = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            'import main; import torch; print("MACOS_NATIVE_ML_IMPORT_OK", flush=True)',
+        ],
+        cwd=BACKEND_ROOT,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+
+    assert proc.returncode == 0, proc.stderr
+    assert "MACOS_NATIVE_ML_IMPORT_OK" in proc.stdout
+    assert "OMP: Error" not in proc.stderr
 
 
 # ---------------------------------------------------------------------------

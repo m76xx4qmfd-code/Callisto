@@ -50,6 +50,11 @@ from utils.converters import coerce_bool, safe_float
 
 logger = get_logger(__name__)
 
+# The inherited Polymarket executor is retained only as source material while
+# Callisto builds a Kalshi-native lifecycle. This is intentionally not an
+# environment setting: deployment configuration cannot arm the legacy venue.
+_LEGACY_POLYMARKET_EXECUTION_AVAILABLE = False
+
 ZERO = Decimal("0")
 USDC_BASE_UNITS = Decimal("1000000")
 POLYMARKET_SIGNATURE_TYPES = (0, 1, 2)
@@ -2510,6 +2515,17 @@ class LiveExecutionService:
             print(c.get_version())  # expect 2
             "
         """
+        # Callisto has not connected its Kalshi-native lifecycle to execution.
+        # The inherited Polymarket executor is therefore unavailable even when
+        # legacy credentials happen to exist on the host. This guard is not
+        # configurable: enabling live writes requires a reviewed Callisto
+        # implementation with explicit current-session arming.
+        if not _LEGACY_POLYMARKET_EXECUTION_AVAILABLE:
+            self._last_init_error = "legacy_polymarket_execution_disabled_in_callisto"
+            self._init_retry_not_before = None
+            logger.warning("Legacy Polymarket execution is disabled in Callisto")
+            return False
+
         init_lock = self._get_init_lock()
         async with init_lock:
             # Double-checked locking: another caller may have finished

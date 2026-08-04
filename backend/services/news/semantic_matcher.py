@@ -32,13 +32,20 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 _HAS_FAISS = False
-# FAISS remains enabled by default; set NEWS_ENABLE_FAISS=0 only for emergency fallback.
-_ENABLE_FAISS = os.environ.get("NEWS_ENABLE_FAISS", "0" if sys.platform == "win32" else "1").strip().lower() not in {
-    "0",
-    "false",
-    "no",
-    "off",
-}
+
+
+def _faiss_enabled_by_default(platform: str) -> bool:
+    """Avoid incompatible bundled OpenMP runtimes on desktop platforms."""
+    return platform not in {"darwin", "win32"}
+
+
+# FAISS wheels bundle an OpenMP runtime on macOS. sentence-transformers/torch
+# loads another one, and the process aborts before FastAPI can start. NumPy
+# cosine similarity remains the supported desktop path. Standard Linux
+# deployments can still disable FAISS explicitly with NEWS_ENABLE_FAISS=0.
+_ENABLE_FAISS = _faiss_enabled_by_default(sys.platform) and os.environ.get(
+    "NEWS_ENABLE_FAISS", "1"
+).strip().lower() not in {"0", "false", "no", "off"}
 
 # Disable tokenizer parallelism to avoid segfaults when called from
 # multiple threads (e.g. asyncio.to_thread in news_edge + API routes).

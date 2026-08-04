@@ -10,6 +10,25 @@ Callisto is a Kalshi-first prediction-market research, strategy, paper-trading, 
 - Callisto is an independent modified version and is not affiliated with or endorsed by the upstream Homerun authors.
 - Existing copyright, attribution, warranty, and license notices are preserved. Callisto modifications are tracked in git history.
 
+## Safe local runtime
+
+Run setup once, then use the documented launcher:
+
+```bash
+./scripts/infra/setup.sh --no-banner
+./scripts/infra/run.sh
+```
+
+- Frontend: http://localhost:5173
+- Backend: http://localhost:8000
+- API documentation: http://localhost:8000/docs
+- API startup does not initialize a venue executor or require trading credentials.
+- The launcher starts API and frontend only. Use `./scripts/infra/run.sh --workers` to explicitly select the non-execution worker planes for the current launcher session.
+- Redis and worker planes are optional capabilities and do not gate HTTP API readiness.
+- Standard macOS setup omits FAISS and removes it from existing virtual environments; semantic matching uses sentence-transformer embeddings with NumPy similarity to avoid incompatible vendored OpenMP runtimes.
+- The inherited Polymarket executor is hard-disabled and cannot be enabled through environment configuration.
+- The Kalshi V2 foundation remains disconnected from live execution; credential availability does not authorize trading.
+
 ## Project constraints
 
 - **Lefty-v5 is read-only source material.** Callisto must not modify `/Users/aituring/Madigan Development Dropbox/Ai Turing/Loogle.ai/1. MarvinAI/Lefty-v5`.

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Homerun GUI – Desktop launcher for the Homerun trading platform.
+"""Callisto GUI – Desktop launcher for the Callisto trading platform.
 
 Native tkinter desktop launcher.  Zero extra dependencies – tkinter ships
 with every standard Python install.
@@ -106,7 +106,7 @@ def _acquire_single_instance_guard() -> bool:
     if _single_instance_handle:
         return True
     try:
-        mutex = _kernel32.CreateMutexW(None, False, "Local\\HomerunDesktopLauncher")
+        mutex = _kernel32.CreateMutexW(None, False, "Local\\CallistoDesktopLauncher")
         if not mutex:
             return True
         already_running = int(_kernel32.GetLastError()) == _ERROR_ALREADY_EXISTS
@@ -221,7 +221,7 @@ def _sigbreak_kill_children() -> None:
 # Constants
 # ---------------------------------------------------------------------------
 BACKEND_PORT = 8000
-FRONTEND_PORT = 3000
+FRONTEND_PORT = 5173
 # Plane separation: trading workers run in one process, news/weather
 # (ML-heavy: sentence-transformers, FAISS) in another, and wallet
 # discovery / smart-pool work in a third.  Discovery is isolated
@@ -705,6 +705,10 @@ class HomerunApp:
         self._health_poll_inflight = False
         self._worker_supervisor_lock = threading.Lock()
         self._worker_supervisor_inflight = False
+        # Worker permission is current-launch state only. It is never loaded
+        # from persisted settings, so restarting the launcher returns to the
+        # safe API/frontend-only runtime.
+        self._worker_supervision_enabled = "--workers" in sys.argv[1:]
         self._health_last_success_monotonic = 0.0
         self._health_consecutive_failures = 0
 
@@ -717,7 +721,7 @@ class HomerunApp:
     def _build_ui(self) -> None:
         self.root = tk.Tk()
         self.root.report_callback_exception = self._report_tk_exception
-        self.root.title("HOMERUN – Autonomous Prediction Market Trading Platform")
+        self.root.title("CALLISTO – Prediction Market Research and Trading Platform")
         self.root.configure(bg=BG)
         self.root.geometry("1200x820")
         self.root.minsize(800, 500)
@@ -1898,6 +1902,8 @@ class HomerunApp:
             self.worker_procs.pop(plane_name, None)
 
     def _ensure_worker_planes_alive(self) -> None:
+        if not self._worker_supervision_enabled:
+            return
         if self.backend_proc is None or self.backend_proc.poll() is not None:
             return
         for _source_tag, plane_name in _WORKER_PLANES:

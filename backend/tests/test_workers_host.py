@@ -61,18 +61,13 @@ def test_should_not_suppress_arbitrary_runtime_error():
 
 
 @pytest.mark.asyncio
-async def test_initialize_services_schedules_live_execution_in_background(monkeypatch):
+async def test_initialize_services_never_schedules_legacy_live_execution(monkeypatch):
     worker_host = host.WorkerHost("all")
     worker_host._plane_config = {key: False for key in worker_host._plane_config}
+    # A stale or externally supplied plane flag must not be enough to arm venue execution.
     worker_host._plane_config["initialize_live_execution"] = True
 
-    started = asyncio.Event()
     release = asyncio.Event()
-
-    async def fake_live_initialize():
-        started.set()
-        await release.wait()
-        return True
 
     async def fake_watchdog():
         await release.wait()
@@ -80,18 +75,12 @@ async def test_initialize_services_schedules_live_execution_in_background(monkey
     async def fake_memory_loop():
         await release.wait()
 
-    monkeypatch.setattr(host.live_execution_service, "initialize", fake_live_initialize)
     monkeypatch.setattr(database_module, "start_pool_watchdog", lambda: asyncio.create_task(fake_watchdog()))
     monkeypatch.setattr("utils.memory_diagnostic.memory_diagnostic_loop", fake_memory_loop)
 
     await worker_host._initialize_services()
 
-    live_init_tasks = [
-        task for task in worker_host._background_tasks if task.get_name() == "all-live-execution-init"
-    ]
-    assert len(live_init_tasks) == 1
-    assert not live_init_tasks[0].done()
-    await asyncio.wait_for(started.wait(), timeout=0.2)
+    assert not [task for task in worker_host._background_tasks if "live-execution-init" in task.get_name()]
 
     release.set()
     await asyncio.gather(*worker_host._background_tasks, return_exceptions=True)

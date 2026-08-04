@@ -30,13 +30,16 @@ logger = logging.getLogger(__name__)
 
 _HAS_TRANSFORMERS = False
 _HAS_FAISS = False
-# FAISS remains enabled by default; set NEWS_ENABLE_FAISS=0 only for emergency fallback.
-_ENABLE_FAISS = os.environ.get("NEWS_ENABLE_FAISS", "0" if sys.platform == "win32" else "1").strip().lower() not in {
-    "0",
-    "false",
-    "no",
-    "off",
-}
+
+
+def _faiss_enabled_by_default(platform: str) -> bool:
+    """Avoid incompatible bundled OpenMP runtimes on desktop platforms."""
+    return platform not in {"darwin", "win32"}
+
+
+_ENABLE_FAISS = _faiss_enabled_by_default(sys.platform) and os.environ.get(
+    "NEWS_ENABLE_FAISS", "1"
+).strip().lower() not in {"0", "false", "no", "off"}
 
 # Pre-2026-04-29 this was an unconditional top-level import:
 #
