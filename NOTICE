@@ -1,0 +1,17 @@
+Callisto
+========
+
+Callisto is a modified version of Homerun:
+https://github.com/braedonsaunders/homerun
+
+Callisto fork:
+https://github.com/m76xx4qmfd-code/Callisto
+
+Original project copyright and attribution notices are preserved in the repository and its git history. Callisto modifications are licensed under the GNU Affero General Public License, version 3 or (at your option) any later version, consistent with the upstream license.
+
+Callisto is not affiliated with or endorsed by the upstream Homerun authors.
+
+Modification history
+--------------------
+
+2026-08-04: Fork baseline established for a Kalshi-first implementation under the Callisto name. Initial work preserves the upstream source while documenting the required Kalshi V2 venue refactor and execution-safety changes.

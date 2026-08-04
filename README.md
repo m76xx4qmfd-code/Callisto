@@ -1,6 +1,14 @@
 # Callisto
 
-Callisto is a Kalshi-first prediction-market research, strategy, paper-trading, and execution platform inspired by the functional scope of Homerun.
+Callisto is a Kalshi-first prediction-market research, strategy, paper-trading, and execution platform forked from [Homerun](https://github.com/braedonsaunders/homerun).
+
+## Fork and license
+
+- Upstream: https://github.com/braedonsaunders/homerun
+- Callisto repository: https://github.com/m76xx4qmfd-code/Callisto
+- License: GNU Affero General Public License v3.0 or later (`AGPL-3.0-or-later`)
+- Callisto is an independent modified version and is not affiliated with or endorsed by the upstream Homerun authors.
+- Existing copyright, attribution, warranty, and license notices are preserved. Callisto modifications are tracked in git history.
 
 ## Project constraints
 
@@ -12,4 +20,4 @@ Callisto is a Kalshi-first prediction-market research, strategy, paper-trading, 
 
 ## Current phase
 
-Research and architecture review. See `docs/research/`.
+The AGPL fork baseline is established. The first engineering phase is to introduce a Kalshi-native venue boundary and current V2 API support before enabling live execution. See `docs/research/`.
