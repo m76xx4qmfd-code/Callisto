@@ -10,9 +10,11 @@ runtime in this foundation increment.
 from __future__ import annotations
 
 import base64
+import re
 import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from decimal import ROUND_DOWN, Decimal, InvalidOperation
 from typing import Literal, cast
 from urllib.parse import urlsplit
@@ -41,6 +43,11 @@ _ORDERS_PATH = f"{KALSHI_API_PREFIX}/portfolio/orders"
 _FILLS_PATH = f"{KALSHI_API_PREFIX}/portfolio/fills"
 _POSITIONS_PATH = f"{KALSHI_API_PREFIX}/portfolio/positions"
 _SETTLEMENTS_PATH = f"{KALSHI_API_PREFIX}/portfolio/settlements"
+_HISTORICAL_CUTOFF_PATH = f"{KALSHI_API_PREFIX}/historical/cutoff"
+_HISTORICAL_ORDERS_PATH = f"{KALSHI_API_PREFIX}/historical/orders"
+_HISTORICAL_FILLS_PATH = f"{KALSHI_API_PREFIX}/historical/fills"
+_RFC3339_PATTERN = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.(?P<fraction>\d+))?(?:Z|[+-]\d{2}:\d{2})$")
+_SIGNED_INT64_MAX = 2**63 - 1
 
 BookSide = Literal["bid", "ask"]
 TimeInForce = Literal["good_till_canceled", "immediate_or_cancel", "fill_or_kill"]
@@ -133,6 +140,31 @@ def _optional_text(payload: Mapping[str, object], key: str) -> str | None:
     return value.strip()
 
 
+def _required_timestamp(payload: Mapping[str, object], key: str, *, context: str) -> datetime:
+    if key not in payload:
+        raise KalshiProtocolError(f"{key} is required in the Kalshi {context} response")
+    value = _required_text(payload, key, context=context)
+    match = _RFC3339_PATTERN.fullmatch(value)
+    if match is None:
+        raise KalshiProtocolError(f"{key} must be RFC3339 with a timezone")
+    fraction = match.group("fraction")
+    if fraction is not None and len(fraction) > 6:
+        raise KalshiProtocolError(f"{key} exceeds microsecond precision")
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise KalshiProtocolError(f"{key} must be RFC3339 with a timezone") from exc
+    if parsed.tzinfo is None:
+        raise KalshiProtocolError(f"{key} must be RFC3339 with a timezone")
+    return parsed.astimezone(timezone.utc)
+
+
+def _optional_timestamp(payload: Mapping[str, object], key: str, *, context: str) -> datetime | None:
+    if key not in payload:
+        return None
+    return _required_timestamp(payload, key, context=context)
+
+
 def _required_decimal(payload: Mapping[str, object], key: str, *, context: str) -> Decimal:
     try:
         return _decimal(payload[key], field=key)
@@ -183,6 +215,8 @@ def _validate_page_query(
         raise KalshiProtocolError("limit must be an integer between 1 and 1000")
     params: dict[str, str | int] = {"limit": limit}
     if cursor is not None:
+        if not isinstance(cursor, str):
+            raise KalshiProtocolError("cursor must be a string when provided")
         cursor = cursor.strip()
         if not cursor:
             raise KalshiProtocolError("cursor cannot be empty when provided")
@@ -193,8 +227,8 @@ def _validate_page_query(
         params["subaccount"] = subaccount
     for name, value in (("min_ts", min_ts), ("max_ts", max_ts)):
         if value is not None:
-            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
-                raise KalshiProtocolError(f"{name} must be a non-negative integer")
+            if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= _SIGNED_INT64_MAX:
+                raise KalshiProtocolError(f"{name} must be a non-negative signed 64-bit integer")
             params[name] = value
     if min_ts is not None and max_ts is not None and min_ts > max_ts:
         raise KalshiProtocolError("min_ts cannot be greater than max_ts")
@@ -204,10 +238,45 @@ def _validate_page_query(
 def _add_text_query(params: dict[str, str | int], name: str, value: str | None) -> None:
     if value is None:
         return
+    if not isinstance(value, str):
+        raise KalshiProtocolError(f"{name} must be a string when provided")
     value = value.strip()
     if not value:
         raise KalshiProtocolError(f"{name} cannot be empty when provided")
     params[name] = value
+
+
+@dataclass(frozen=True)
+class KalshiHistoricalCutoff:
+    market_settled_at: datetime
+    trades_created_at: datetime
+    orders_updated_at: datetime
+    market_positions_last_updated_at: datetime | None
+
+    @classmethod
+    def from_payload(cls, payload: Mapping[str, object]) -> KalshiHistoricalCutoff:
+        return cls(
+            market_settled_at=_required_timestamp(
+                payload,
+                "market_settled_ts",
+                context="historical cutoff",
+            ),
+            trades_created_at=_required_timestamp(
+                payload,
+                "trades_created_ts",
+                context="historical cutoff",
+            ),
+            orders_updated_at=_required_timestamp(
+                payload,
+                "orders_updated_ts",
+                context="historical cutoff",
+            ),
+            market_positions_last_updated_at=_optional_timestamp(
+                payload,
+                "market_positions_last_updated_ts",
+                context="historical cutoff",
+            ),
+        )
 
 
 @dataclass(frozen=True)
@@ -902,6 +971,63 @@ class KalshiV2Client:
         )
         return KalshiBalanceSnapshot.from_payload(payload)
 
+    async def get_historical_cutoff(self) -> KalshiHistoricalCutoff:
+        """Return the authoritative boundary between current and archived data."""
+
+        payload = await self._signed_get_json(
+            path=_HISTORICAL_CUTOFF_PATH,
+            response_name="historical cutoff",
+        )
+        return KalshiHistoricalCutoff.from_payload(payload)
+
+    async def get_historical_orders(
+        self,
+        *,
+        ticker: str | None = None,
+        max_ts: int | None = None,
+        limit: int = 100,
+        cursor: str | None = None,
+    ) -> KalshiOrdersPage:
+        """Return one authoritative page of archived orders."""
+
+        params = _validate_page_query(
+            limit=limit,
+            cursor=cursor,
+            subaccount=None,
+            max_ts=max_ts,
+        )
+        _add_text_query(params, "ticker", ticker)
+        payload = await self._signed_get_json(
+            path=_HISTORICAL_ORDERS_PATH,
+            params=params,
+            response_name="historical orders",
+        )
+        return KalshiOrdersPage.from_payload(payload)
+
+    async def get_historical_fills(
+        self,
+        *,
+        ticker: str | None = None,
+        max_ts: int | None = None,
+        limit: int = 100,
+        cursor: str | None = None,
+    ) -> KalshiFillsPage:
+        """Return one authoritative page of archived fills."""
+
+        params = _validate_page_query(
+            limit=limit,
+            cursor=cursor,
+            subaccount=None,
+            max_ts=max_ts,
+        )
+        _add_text_query(params, "ticker", ticker)
+        payload = await self._signed_get_json(
+            path=_HISTORICAL_FILLS_PATH,
+            params=params,
+            response_name="historical fills",
+        )
+        return KalshiFillsPage.from_payload(payload)
+
     async def get_orders(
         self,
         *,
@@ -914,7 +1040,7 @@ class KalshiV2Client:
         cursor: str | None = None,
         subaccount: int | None = None,
     ) -> KalshiOrdersPage:
-        """Return one authoritative page of current or historical orders."""
+        """Return one authoritative page of current portfolio orders."""
 
         params = _validate_page_query(
             limit=limit,
