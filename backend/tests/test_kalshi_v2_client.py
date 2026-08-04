@@ -76,7 +76,7 @@ def test_event_order_payload_uses_current_v2_fixed_point_shape() -> None:
         "client_order_id": "8c35ecb3-328f-4f52-8c7c-0f4b9862f8d1",
         "side": "bid",
         "count": "10.00",
-        "price": "0.5600",
+        "price": "0.560000",
         "time_in_force": "good_till_canceled",
         "self_trade_prevention_type": "taker_at_cross",
         "post_only": True,
@@ -85,6 +85,41 @@ def test_event_order_payload_uses_current_v2_fixed_point_shape() -> None:
         "subaccount": 0,
         "exchange_index": 0,
     }
+
+
+def test_event_order_accepts_six_decimal_price_and_auto_route_exchange_index() -> None:
+    order = KalshiEventOrderRequest(
+        ticker="HIGHNY-24JAN01-T60",
+        client_order_id="six-decimal",
+        side="bid",
+        count=Decimal(1),
+        price=Decimal("0.123456"),
+        exchange_index=-1,
+    )
+
+    assert order.to_payload()["price"] == "0.123456"
+    assert order.to_payload()["exchange_index"] == -1
+
+
+def test_event_order_rejects_invalid_wire_values() -> None:
+    common = {
+        "ticker": "HIGHNY-24JAN01-T60",
+        "client_order_id": "invalid-wire-value",
+        "side": "bid",
+        "count": Decimal(1),
+        "price": Decimal("0.500000"),
+    }
+
+    with pytest.raises(KalshiProtocolError, match="self_trade_prevention_type"):
+        KalshiEventOrderRequest(**common, self_trade_prevention_type="unknown")
+    with pytest.raises(KalshiProtocolError, match="subaccount must be an integer"):
+        KalshiEventOrderRequest(**common, subaccount=1.5)  # type: ignore[arg-type]
+    with pytest.raises(KalshiProtocolError, match="exchange_index must be an integer"):
+        KalshiEventOrderRequest(**common, exchange_index=True)  # type: ignore[arg-type]
+    with pytest.raises(KalshiProtocolError, match="exchange_index cannot be less than -1"):
+        KalshiEventOrderRequest(**common, exchange_index=-2)
+    with pytest.raises(KalshiProtocolError, match="more precision"):
+        KalshiEventOrderRequest(**{**common, "price": Decimal("0.1234567")})
 
 
 def test_client_rejects_untrusted_origin_before_credentials_can_be_sent(
@@ -226,7 +261,6 @@ async def test_create_order_posts_current_v2_shape_and_parses_ack(private_key_pe
             201,
             json={
                 "order_id": "order-1",
-                "client_order_id": "client-1",
                 "fill_count": "0.00",
                 "remaining_count": "2.00",
                 "ts_ms": 1_725_000_000_456,
@@ -265,7 +299,7 @@ async def test_create_order_posts_current_v2_shape_and_parses_ack(private_key_pe
     payload = json.loads(sent.content)
     assert payload["side"] == "ask"
     assert payload["count"] == "2.00"
-    assert payload["price"] == "0.6100"
+    assert payload["price"] == "0.610000"
     assert payload["reduce_only"] is True
 
 
@@ -330,3 +364,72 @@ async def test_explicit_order_rejection_is_not_retried(private_key_pem: str) -> 
     assert exc_info.value.status_code == 409
     assert exc_info.value.client_order_id == "client-rejected"
     assert calls == 1
+
+
+@pytest.mark.asyncio
+async def test_server_error_after_submission_is_unknown(private_key_pem: str) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(503, json={"error": "temporary venue failure"})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        client = KalshiV2Client(
+            key_id="key-id",
+            private_key_pem=private_key_pem,
+            http_client=http,
+            allow_writes=True,
+        )
+        with pytest.raises(KalshiSubmissionUnknown) as exc_info:
+            await client.create_order(
+                KalshiEventOrderRequest(
+                    ticker="HIGHNY-24JAN01-T60",
+                    client_order_id="client-server-error",
+                    side="bid",
+                    count=Decimal(1),
+                    price=Decimal("0.400000"),
+                )
+            )
+
+    assert exc_info.value.client_order_id == "client-server-error"
+    assert isinstance(exc_info.value.cause, KalshiAPIError)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "response_payload",
+    [
+        {},
+        {
+            "order_id": "order-1",
+            "client_order_id": "different-client-id",
+            "fill_count": "0.00",
+            "remaining_count": "1.00",
+            "ts_ms": 1_725_000_000_456,
+        },
+    ],
+)
+async def test_successful_but_unusable_acknowledgement_is_submission_unknown(
+    private_key_pem: str,
+    response_payload: dict[str, object],
+) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(201, json=response_payload)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        client = KalshiV2Client(
+            key_id="key-id",
+            private_key_pem=private_key_pem,
+            http_client=http,
+            allow_writes=True,
+        )
+        with pytest.raises(KalshiSubmissionUnknown) as exc_info:
+            await client.create_order(
+                KalshiEventOrderRequest(
+                    ticker="HIGHNY-24JAN01-T60",
+                    client_order_id="client-ambiguous",
+                    side="bid",
+                    count=Decimal(1),
+                    price=Decimal("0.400000"),
+                )
+            )
+
+    assert exc_info.value.client_order_id == "client-ambiguous"

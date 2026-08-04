@@ -27,11 +27,13 @@ Introduce a current, testable Kalshi Predictions API V2 boundary without changin
 - Exact event-order endpoint: `/trade-api/v2/portfolio/events/orders`.
 - Credential-bearing requests restricted to documented Kalshi production and demo origins.
 - Decimal fixed-point quantities and prices.
+- Six-decimal `FixedPointDollars` price support and `exchange_index=-1` auto-routing.
+- Exact self-trade-prevention enum and integer-field validation.
 - Venue-intent translation.
 - Direct V2 acknowledgement parsing.
 - Explicit fail-closed write arming.
 - No automatic POST retry.
-- Ambiguous transport failure becomes `KalshiSubmissionUnknown`, requiring reconciliation by `client_order_id`.
+- Ambiguous transport, server-error, malformed-success, or mismatched-acknowledgement outcomes become `KalshiSubmissionUnknown`, requiring reconciliation by `client_order_id`.
 
 ### Deliberately not connected
 
@@ -56,6 +58,9 @@ Introduce a current, testable Kalshi Predictions API V2 boundary without changin
 10. Origin-allowlist and explicit-rejection/no-retry tests were added RED-first.
 11. The untrusted-origin test failed until credential-bearing requests were restricted to documented Kalshi hosts.
 12. Ten focused tests passed.
+13. Independent financial/protocol review identified acknowledgement ambiguity and V2 schema mismatches.
+14. Regression tests were added for optional response `client_order_id`, malformed/mismatched successful acknowledgements, six-decimal prices, `exchange_index=-1`, self-trade-prevention enums, integer fields, and server errors.
+15. Fifteen focused tests passed after the corrections.
 
 ## Authenticated read-only verification
 

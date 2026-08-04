@@ -39,6 +39,7 @@ _BALANCE_PATH = f"{KALSHI_API_PREFIX}/portfolio/balance"
 
 BookSide = Literal["bid", "ask"]
 TimeInForce = Literal["good_till_canceled", "immediate_or_cancel", "fill_or_kill"]
+SelfTradePreventionType = Literal["taker_at_cross", "maker"]
 
 
 class LiveTradingNotArmedError(RuntimeError):
@@ -168,7 +169,7 @@ class KalshiEventOrderRequest:
     count: Decimal
     price: Decimal
     time_in_force: TimeInForce = "good_till_canceled"
-    self_trade_prevention_type: str = "taker_at_cross"
+    self_trade_prevention_type: SelfTradePreventionType = "taker_at_cross"
     post_only: bool = False
     cancel_order_on_pause: bool = False
     reduce_only: bool = False
@@ -193,19 +194,23 @@ class KalshiEventOrderRequest:
             "fill_or_kill",
         }:
             raise KalshiProtocolError("unsupported time_in_force")
-        if not self.self_trade_prevention_type.strip():
-            raise KalshiProtocolError("self_trade_prevention_type is required")
+        if self.self_trade_prevention_type not in {"taker_at_cross", "maker"}:
+            raise KalshiProtocolError("self_trade_prevention_type must be 'taker_at_cross' or 'maker'")
         if count <= 0:
             raise KalshiProtocolError("count must be greater than zero")
         if price <= 0 or price >= 1:
             raise KalshiProtocolError("price must be greater than 0 and less than 1")
+        if isinstance(self.subaccount, bool) or not isinstance(self.subaccount, int):
+            raise KalshiProtocolError("subaccount must be an integer")
         if self.subaccount < 0:
             raise KalshiProtocolError("subaccount cannot be negative")
-        if self.exchange_index < 0:
-            raise KalshiProtocolError("exchange_index cannot be negative")
+        if isinstance(self.exchange_index, bool) or not isinstance(self.exchange_index, int):
+            raise KalshiProtocolError("exchange_index must be an integer")
+        if self.exchange_index < -1:
+            raise KalshiProtocolError("exchange_index cannot be less than -1")
 
         _fixed(count, quantum=Decimal("0.01"), field="count")
-        _fixed(price, quantum=Decimal("0.0001"), field="price")
+        _fixed(price, quantum=Decimal("0.000001"), field="price")
         object.__setattr__(self, "ticker", ticker)
         object.__setattr__(self, "client_order_id", client_order_id)
         object.__setattr__(self, "count", count)
@@ -217,7 +222,7 @@ class KalshiEventOrderRequest:
             "client_order_id": self.client_order_id,
             "side": self.side,
             "count": _fixed(self.count, quantum=Decimal("0.01"), field="count"),
-            "price": _fixed(self.price, quantum=Decimal("0.0001"), field="price"),
+            "price": _fixed(self.price, quantum=Decimal("0.000001"), field="price"),
             "time_in_force": self.time_in_force,
             "self_trade_prevention_type": self.self_trade_prevention_type,
             "post_only": self.post_only,
@@ -237,10 +242,18 @@ class KalshiOrderAcknowledgement:
     ts_ms: int
 
     @classmethod
-    def from_payload(cls, payload: Mapping[str, object]) -> KalshiOrderAcknowledgement:
+    def from_payload(
+        cls,
+        payload: Mapping[str, object],
+        *,
+        submitted_client_order_id: str,
+    ) -> KalshiOrderAcknowledgement:
         try:
             order_id = str(payload["order_id"]).strip()
-            client_order_id = str(payload["client_order_id"]).strip()
+            raw_client_order_id = payload.get("client_order_id")
+            client_order_id = (
+                submitted_client_order_id if raw_client_order_id is None else str(raw_client_order_id).strip()
+            )
             fill_count = _decimal(payload["fill_count"], field="fill_count")
             remaining_count = _decimal(payload["remaining_count"], field="remaining_count")
             raw_ts_ms = payload["ts_ms"]
@@ -414,6 +427,15 @@ class KalshiV2Client:
         except httpx.TransportError as exc:
             raise KalshiSubmissionUnknown(client_order_id=order.client_order_id, cause=exc) from exc
 
+        if response.status_code >= 500:
+            raise KalshiSubmissionUnknown(
+                client_order_id=order.client_order_id,
+                cause=KalshiAPIError(
+                    status_code=response.status_code,
+                    detail=response.text[:1000],
+                    client_order_id=order.client_order_id,
+                ),
+            )
         if response.is_error:
             raise KalshiAPIError(
                 status_code=response.status_code,
@@ -422,11 +444,17 @@ class KalshiV2Client:
             )
         try:
             payload = response.json()
-        except ValueError as exc:
-            raise KalshiProtocolError("Kalshi V2 order acknowledgement was not JSON") from exc
-        if not isinstance(payload, dict):
-            raise KalshiProtocolError("Kalshi V2 order acknowledgement must be an object")
-        acknowledgement = KalshiOrderAcknowledgement.from_payload(payload)
-        if acknowledgement.client_order_id != order.client_order_id:
-            raise KalshiProtocolError("Kalshi acknowledgement client_order_id did not match submission")
-        return acknowledgement
+            if not isinstance(payload, dict):
+                raise KalshiProtocolError("Kalshi V2 order acknowledgement must be an object")
+            acknowledgement = KalshiOrderAcknowledgement.from_payload(
+                payload,
+                submitted_client_order_id=order.client_order_id,
+            )
+            if acknowledgement.client_order_id != order.client_order_id:
+                raise KalshiProtocolError("Kalshi acknowledgement client_order_id did not match submission")
+            return acknowledgement
+        except (ValueError, TypeError) as exc:
+            raise KalshiSubmissionUnknown(
+                client_order_id=order.client_order_id,
+                cause=exc,
+            ) from exc
