@@ -1,8 +1,8 @@
 [Desktop Entry]
 Version=1.0
 Type=Application
-Name=Homerun
-Comment=Launch Homerun
+Name=Callisto
+Comment=Launch Callisto
 Exec=sh -lc 'cd "$(dirname "%k")/../infra" && ./run.sh'
 Terminal=false
 StartupNotify=true

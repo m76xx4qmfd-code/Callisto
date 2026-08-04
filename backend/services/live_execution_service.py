@@ -2817,6 +2817,8 @@ class LiveExecutionService:
 
     def is_ready(self) -> bool:
         """Check if trading service is ready"""
+        if not _LEGACY_POLYMARKET_EXECUTION_AVAILABLE:
+            return False
         return self._initialized and self._client is not None
 
     def get_last_init_error(self) -> Optional[str]:

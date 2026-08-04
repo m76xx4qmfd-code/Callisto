@@ -1,6 +1,7 @@
 import sys
 import asyncio
 from pathlib import Path
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -61,11 +62,14 @@ def test_should_not_suppress_arbitrary_runtime_error():
 
 
 @pytest.mark.asyncio
-async def test_initialize_services_never_schedules_legacy_live_execution(monkeypatch):
+async def test_initialize_services_never_touches_legacy_live_execution(monkeypatch):
     worker_host = host.WorkerHost("all")
     worker_host._plane_config = {key: False for key in worker_host._plane_config}
-    # A stale or externally supplied plane flag must not be enough to arm venue execution.
-    worker_host._plane_config["initialize_live_execution"] = True
+
+    from services.live_execution_service import live_execution_service
+
+    initialize = AsyncMock(side_effect=AssertionError("legacy execution must not initialize"))
+    monkeypatch.setattr(live_execution_service, "initialize", initialize)
 
     release = asyncio.Event()
 
@@ -81,6 +85,7 @@ async def test_initialize_services_never_schedules_legacy_live_execution(monkeyp
     await worker_host._initialize_services()
 
     assert not [task for task in worker_host._background_tasks if "live-execution-init" in task.get_name()]
+    initialize.assert_not_awaited()
 
     release.set()
     await asyncio.gather(*worker_host._background_tasks, return_exceptions=True)

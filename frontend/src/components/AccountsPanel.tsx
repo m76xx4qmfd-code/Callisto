@@ -143,10 +143,13 @@ export default function AccountsPanel({ onOpenSettings }: AccountsPanelProps) {
     refetchInterval: 10000,
   })
 
+  // The inherited Polymarket executor is unavailable in Callisto. Keep the
+  // query definition for type-compatible UI rendering, but never poll the
+  // legacy status route or trigger follow-on balance/position requests.
   const { data: tradingStatus } = useQuery({
     queryKey: ['trading-status'],
     queryFn: getTradingStatus,
-    refetchInterval: 10000,
+    enabled: false,
     retry: false,
   })
   const polymarketReady = Boolean(tradingStatus?.authenticated || tradingStatus?.initialized)
