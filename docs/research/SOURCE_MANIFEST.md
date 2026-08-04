@@ -24,5 +24,18 @@
 ## Competitive landscape starting source
 
 - QuickNode tools overview: https://www.quicknode.com/builders-guide/best/top-10-kalshi-trading-tools-bots
+- Kalshi BackTest: https://kalshibacktest.com/
+- Lychee Kalshi historical data: https://lycheedata.com/kalshi-historical-data
+- DepthFeed / Kalshi Backtesting: https://kalshibacktesting.com/
+- Pathfinder: https://www.pathfinderv1.com/
+
+## Licensing and functional-reimplementation sources
+
+- GNU AGPL v3: https://www.gnu.org/licenses/agpl-3.0.en.html
+- GNU GPL FAQ: https://www.gnu.org/licenses/gpl-faq.html
+- U.S. Copyright Office FAQ: https://www.copyright.gov/help/faq/faq-protect.html
+- U.S. Copyright Office Circular 33: https://www.copyright.gov/circs/circ33.pdf
+- *Google LLC v. Oracle America, Inc.*: https://www.supremecourt.gov/opinions/20pdf/18-956_d18f.pdf
+- USPTO trademark basics: https://www.uspto.gov/trademarks/basics/what-trademark
 
 All third-party feature descriptions must be treated as vendor/editorial claims until independently verified.

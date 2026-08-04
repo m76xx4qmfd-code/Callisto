@@ -66,6 +66,84 @@
       "url": "https://docs.kalshi.com/api-reference/orders/create-order-v2",
       "title": "Kalshi API Reference: Create Order V2",
       "accessed": "2026-08-04"
+    },
+    {
+      "id": 12,
+      "url": "https://docs.kalshi.com/getting_started/api_environments",
+      "title": "Kalshi API Environments",
+      "accessed": "2026-08-04"
+    },
+    {
+      "id": 13,
+      "url": "https://docs.kalshi.com/api-reference/portfolio/get-fills",
+      "title": "Kalshi Get Fills",
+      "accessed": "2026-08-04"
+    },
+    {
+      "id": 14,
+      "url": "https://docs.kalshi.com/api-reference/portfolio/get-positions",
+      "title": "Kalshi Get Positions",
+      "accessed": "2026-08-04"
+    },
+    {
+      "id": 15,
+      "url": "https://docs.kalshi.com/api-reference/portfolio/get-settlements",
+      "title": "Kalshi Get Settlements",
+      "accessed": "2026-08-04"
+    },
+    {
+      "id": 16,
+      "url": "https://kalshibacktest.com",
+      "title": "Kalshi BackTest",
+      "accessed": "2026-08-04"
+    },
+    {
+      "id": 17,
+      "url": "https://lycheedata.com/kalshi-historical-data",
+      "title": "Lychee Kalshi Historical Data",
+      "accessed": "2026-08-04"
+    },
+    {
+      "id": 18,
+      "url": "https://kalshibacktesting.com",
+      "title": "DepthFeed / Kalshi Backtesting",
+      "accessed": "2026-08-04"
+    },
+    {
+      "id": 19,
+      "url": "https://www.pathfinderv1.com",
+      "title": "Pathfinder",
+      "accessed": "2026-08-04"
+    },
+    {
+      "id": 20,
+      "url": "https://www.gnu.org/licenses/gpl-faq.html",
+      "title": "GNU GPL FAQ",
+      "accessed": "2026-08-04"
+    },
+    {
+      "id": 21,
+      "url": "https://www.copyright.gov/help/faq/faq-protect.html",
+      "title": "US Copyright Office FAQ",
+      "accessed": "2026-08-04"
+    },
+    {
+      "id": 22,
+      "url": "https://www.copyright.gov/circs/circ33.pdf",
+      "title": "US Copyright Office Circular 33",
+      "accessed": "2026-08-04"
+    },
+    {
+      "id": 23,
+      "url": "https://www.supremecourt.gov/opinions/20pdf/18-956_d18f.pdf",
+      "title": "Google LLC v. Oracle America, Inc.",
+      "accessed": "2026-08-04"
+    },
+    {
+      "id": 24,
+      "url": "https://www.uspto.gov/trademarks/basics/what-trademark",
+      "title": "USPTO Trademark Basics",
+      "accessed": "2026-08-04"
     }
   ]
 }

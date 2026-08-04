@@ -248,7 +248,7 @@ Homerun is licensed under GNU AGPL v3.[1][10]
 - Section 13 requires a modified network-interactive version to prominently offer its corresponding source to users interacting with it remotely.[10]
 - Purely local/private use has a different practical posture from offering a hosted service, but future deployment plans matter.
 
-**Recommended engineering posture:** create an independent Callisto repository, write functional specifications from observed behavior, and implement Kalshi-native components without copying Homerun source. This reduces venue-coupling and licensing risk. This is an engineering recommendation, not legal advice; counsel should review before commercial distribution or hosted multi-user deployment.
+**Engineering decision gate:** if Callisto can remain AGPLv3-or-later and expose the running source to remote users, an acknowledged Homerun fork is the fastest route to functional breadth. If Callisto may need to remain proprietary, create an independent implementation from a separately documented functional specification and do not copy or translate Homerun source. This is an engineering assessment, not legal advice; counsel should review before commercial distribution or hosted multi-user deployment.
 
 ## Initial Callisto architecture
 
@@ -326,7 +326,7 @@ Core rule: strategy code never calls Kalshi directly. It emits a typed `Decision
 
 ## Immediate recommendation
 
-Proceed with a **clean-room, Kalshi-native implementation**, not a Homerun fork and not a modification of Lefty. Homerun provides the product map; Lefty provides execution-safety lessons; the current Kalshi V2 specification controls the implementation.
+Do not modify Lefty. Before application code begins, Lou must choose between two legitimate Callisto paths: **(A) an acknowledged AGPL Homerun fork**, which is faster but requires AGPL compliance and source availability to network users, or **(B) an independent proprietary-capable implementation**, which is slower and requires disciplined source separation. In either case, the current Kalshi V2 specification—not Homerun's legacy Kalshi client—controls the execution implementation.
 
 The first executable milestone should be a read-only market/data terminal plus a demo-environment order-lifecycle harness. Strategy development should wait until the data and execution state machine are measurable and replayable.
 
