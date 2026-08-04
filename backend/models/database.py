@@ -3078,6 +3078,7 @@ class VenueOrderIntentRecord(Base):
     strategy_key = Column(String, nullable=True)
     strategy_version = Column(Integer, nullable=True)
     trace_id = Column(String, nullable=True)
+    authenticated_principal_fingerprint = Column(String(64), nullable=True)
     created_at = Column(DateTime, default=_utcnow, nullable=False)
 
     __table_args__ = (
@@ -3104,7 +3105,13 @@ class VenueOrderIntentRecord(Base):
             name="ck_venue_order_intents_tif",
         ),
         CheckConstraint("length(btrim(source)) > 0", name="ck_venue_order_intents_source"),
+        CheckConstraint(
+            "authenticated_principal_fingerprint IS NULL OR "
+            "authenticated_principal_fingerprint ~ '^[0-9a-f]{64}$'",
+            name="ck_venue_order_intents_principal_fingerprint",
+        ),
         Index("idx_venue_order_intents_created", "created_at"),
+        Index("idx_venue_order_intents_principal", "venue", "authenticated_principal_fingerprint"),
     )
 
 

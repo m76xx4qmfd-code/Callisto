@@ -36,7 +36,7 @@ def _intent(*, client_order_id: str = "client-1", quantity: str = "12.34") -> Ve
     )
 
 
-def _provenance() -> VenueIntentProvenance:
+def _provenance(*, fingerprint: str | None = "a" * 64) -> VenueIntentProvenance:
     return VenueIntentProvenance(
         source="strategy_orchestrator",
         source_id="signal-1",
@@ -44,6 +44,7 @@ def _provenance() -> VenueIntentProvenance:
         strategy_key="weather_edge",
         strategy_version=3,
         trace_id="trace-1",
+        authenticated_principal_fingerprint=fingerprint,
     )
 
 
@@ -58,6 +59,20 @@ def _ack(*, provider_order_id: str = "provider-order-1") -> VenueInitialAcknowle
         provider_timestamp=datetime(2026, 8, 4, 12, 1, tzinfo=timezone.utc),
         payload={"order_id": provider_order_id, "fill_count_fp": "1.25"},
     )
+
+
+def test_principal_fingerprint_must_be_an_opaque_lowercase_sha256() -> None:
+    assert (
+        VenueIntentProvenance(
+            source="test",
+            authenticated_principal_fingerprint="a" * 64,
+        ).authenticated_principal_fingerprint
+        == "a" * 64
+    )
+
+    for invalid in ("", "A" * 64, "a" * 63, "not-a-fingerprint"):
+        with pytest.raises(ValueError, match="authenticated principal fingerprint"):
+            VenueIntentProvenance(source="test", authenticated_principal_fingerprint=invalid)
 
 
 @pytest.mark.db
@@ -81,6 +96,7 @@ async def test_record_intent_persists_exact_values_and_initial_event() -> None:
         assert persisted.quantity == Decimal("12.340000000000000000")
         assert persisted.limit_price == Decimal("0.560000000000000000")
         assert persisted.strategy_version == 3
+        assert persisted.authenticated_principal_fingerprint == "a" * 64
         assert [(event.sequence, event.event_type, event.dedupe_key) for event in events] == [
             (1, "intent_recorded", "intent_recorded:v1")
         ]
@@ -106,6 +122,9 @@ async def test_identical_intent_replay_is_idempotent_but_collision_fails() -> No
         async with session_factory() as session, session.begin():
             with pytest.raises(VenueExecutionConflictError, match="client_order_id"):
                 await VenueExecutionLedger(session).record_intent(_intent(quantity="12.35"), _provenance())
+        async with session_factory() as session, session.begin():
+            with pytest.raises(VenueExecutionConflictError, match="client_order_id"):
+                await VenueExecutionLedger(session).record_intent(_intent(), _provenance(fingerprint="b" * 64))
     finally:
         await engine.dispose()
 
