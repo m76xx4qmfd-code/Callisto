@@ -26,6 +26,15 @@ from .kalshi_v2 import (
     LiveTradingNotArmedError,
     event_order_from_intent,
 )
+from .kalshi_v2_ws import (
+    KalshiOrderbookDelta,
+    KalshiOrderbookRecovery,
+    KalshiOrderbookSnapshot,
+    KalshiOrderbookState,
+    KalshiOrderbookView,
+    KalshiWSContinuityError,
+    KalshiWSProtocolError,
+)
 
 __all__ = [
     "KALSHI_API_PREFIX",
@@ -40,6 +49,11 @@ __all__ = [
     "KalshiMarketPosition",
     "KalshiOrder",
     "KalshiOrderAcknowledgement",
+    "KalshiOrderbookDelta",
+    "KalshiOrderbookRecovery",
+    "KalshiOrderbookSnapshot",
+    "KalshiOrderbookState",
+    "KalshiOrderbookView",
     "KalshiOrdersPage",
     "KalshiPositionsPage",
     "KalshiProtocolError",
@@ -49,6 +63,8 @@ __all__ = [
     "KalshiSubaccountBalance",
     "KalshiSubmissionUnknown",
     "KalshiV2Client",
+    "KalshiWSContinuityError",
+    "KalshiWSProtocolError",
     "LiveTradingNotArmedError",
     "VenueOrderIntent",
     "event_order_from_intent",
