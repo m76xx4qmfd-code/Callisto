@@ -283,6 +283,12 @@ class KalshiV2WSLifecycle:
         try:
             return self._orderbook_state.apply_delta(delta)
         except KalshiWSContinuityError as exc:
+            if current is not None:
+                recovery_sequence = max(current.seq + 1, delta.seq)
+                self._minimum_recovery_sequence = max(
+                    self._minimum_recovery_sequence or recovery_sequence,
+                    recovery_sequence,
+                )
             raise KalshiWSLifecycleError(str(exc)) from exc
 
     def recovery_command(self) -> dict[str, object]:
@@ -302,8 +308,13 @@ class KalshiV2WSLifecycle:
         self._terminate(f"kalshi_ws_error:{response.code}")
 
     def disconnect(self, epoch_id: int) -> None:
+        self.terminate_epoch(epoch_id, "disconnected")
+
+    def terminate_epoch(self, epoch_id: int, reason: str) -> None:
         self._require_epoch(epoch_id)
-        self._terminate("disconnected")
+        if not isinstance(reason, str) or not reason.strip():
+            raise KalshiWSLifecycleError("termination reason must be a non-empty string")
+        self._terminate(reason.strip())
 
     def _acknowledged_command_ids(self) -> set[int]:
         return set(self._epoch_commands) - set(self._pending)
