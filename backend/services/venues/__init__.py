@@ -46,6 +46,14 @@ from .kalshi_v2_ws_lifecycle import (
     KalshiWSSubscribed,
     KalshiWSSubscriptionCommand,
 )
+from .kalshi_v2_ws_session import (
+    KalshiV2WSFrameSession,
+    KalshiWSSessionNoOp,
+    KalshiWSSessionPrivateFrame,
+    KalshiWSSessionPublished,
+    KalshiWSSessionRecoveryRequested,
+    KalshiWSSessionTerminated,
+)
 
 __all__ = [
     "KALSHI_API_PREFIX",
@@ -77,12 +85,18 @@ __all__ = [
     "KalshiSubaccountBalance",
     "KalshiSubmissionUnknown",
     "KalshiV2Client",
+    "KalshiV2WSFrameSession",
     "KalshiV2WSLifecycle",
     "KalshiWSConnectionInstructions",
     "KalshiWSContinuityError",
     "KalshiWSErrorResponse",
     "KalshiWSLifecycleError",
     "KalshiWSProtocolError",
+    "KalshiWSSessionNoOp",
+    "KalshiWSSessionPrivateFrame",
+    "KalshiWSSessionPublished",
+    "KalshiWSSessionRecoveryRequested",
+    "KalshiWSSessionTerminated",
     "KalshiWSSubscribed",
     "KalshiWSSubscriptionCommand",
     "LiveTradingNotArmedError",
