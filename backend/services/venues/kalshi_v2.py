@@ -24,6 +24,7 @@ from cryptography.hazmat.primitives.asymmetric import padding, rsa
 from services.venues.contracts import VenueOrderIntent
 
 KALSHI_API_PREFIX = "/trade-api/v2"
+KALSHI_WS_PATH = "/trade-api/ws/v2"
 KALSHI_PRODUCTION_ORIGIN = "https://external-api.kalshi.com"
 KALSHI_DEMO_ORIGIN = "https://external-api.demo.kalshi.co"
 _KALSHI_APPROVED_ORIGINS = frozenset(
@@ -808,8 +809,8 @@ class KalshiRequestSigner:
         if not method_upper:
             raise KalshiProtocolError("HTTP method is required")
         path_without_query = urlsplit(path).path
-        if not path_without_query.startswith(KALSHI_API_PREFIX + "/"):
-            raise KalshiProtocolError(f"signed path must start with {KALSHI_API_PREFIX}/")
+        if not (path_without_query.startswith(KALSHI_API_PREFIX + "/") or path_without_query == KALSHI_WS_PATH):
+            raise KalshiProtocolError(f"signed path must start with {KALSHI_API_PREFIX}/ or equal {KALSHI_WS_PATH}")
         timestamp = str(timestamp_ms)
         message = f"{timestamp}{method_upper}{path_without_query}".encode()
         signature = self._private_key.sign(
