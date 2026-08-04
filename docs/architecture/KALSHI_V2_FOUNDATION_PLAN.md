@@ -74,8 +74,8 @@ The signed request succeeded, the response matched the current documented schema
 
 ## Migration sequence
 
-1. Add signed read-only account methods and validate credentials against a read-only endpoint.
-2. Add current orders, fills, positions, settlements, and WebSocket user-order models.
+1. **Completed:** signed read-only balance method and authenticated read-only credential validation.
+2. **REST component completed:** current orders, fills, positions, and settlements use strict immutable read models. WebSocket user-order/fill models remain outstanding. See `KALSHI_V2_READ_MODELS_PLAN.md`.
 3. Add durable order-intent and execution-event persistence.
 4. Add reconciliation by `client_order_id` before any retry.
 5. Add cancel, decrease, and amend with final-state verification.
