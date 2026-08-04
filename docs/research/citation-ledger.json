@@ -1,0 +1,71 @@
+{
+  "version": 1,
+  "sources": [
+    {
+      "id": 1,
+      "url": "https://github.com/braedonsaunders/homerun",
+      "title": "Homerun repository and README",
+      "accessed": "2026-08-04"
+    },
+    {
+      "id": 2,
+      "url": "https://docs.kalshi.com/getting_started/quick_start_market_data",
+      "title": "Kalshi Quick Start: Market Data",
+      "accessed": "2026-08-04"
+    },
+    {
+      "id": 3,
+      "url": "https://docs.kalshi.com/getting_started/quick_start_authenticated_requests",
+      "title": "Kalshi Quick Start: Authenticated Requests",
+      "accessed": "2026-08-04"
+    },
+    {
+      "id": 4,
+      "url": "https://docs.kalshi.com/getting_started/quick_start_create_order",
+      "title": "Kalshi Quick Start: Create Order",
+      "accessed": "2026-08-04"
+    },
+    {
+      "id": 5,
+      "url": "https://docs.kalshi.com/sdks/overview",
+      "title": "Kalshi SDKs",
+      "accessed": "2026-08-04"
+    },
+    {
+      "id": 6,
+      "url": "https://docs.kalshi.com/getting_started/historical_data",
+      "title": "Kalshi Historical Data",
+      "accessed": "2026-08-04"
+    },
+    {
+      "id": 7,
+      "url": "https://docs.kalshi.com/getting_started/rate_limits",
+      "title": "Kalshi Rate Limits",
+      "accessed": "2026-08-04"
+    },
+    {
+      "id": 8,
+      "url": "https://docs.kalshi.com/getting_started/quick_start_websockets",
+      "title": "Kalshi Quick Start: WebSockets",
+      "accessed": "2026-08-04"
+    },
+    {
+      "id": 9,
+      "url": "https://www.quicknode.com/builders-guide/best/top-10-kalshi-trading-tools-bots",
+      "title": "QuickNode: Top Kalshi Trading Tools and Bots",
+      "accessed": "2026-08-04"
+    },
+    {
+      "id": 10,
+      "url": "https://www.gnu.org/licenses/agpl-3.0.en.html",
+      "title": "GNU AGPL v3",
+      "accessed": "2026-08-04"
+    },
+    {
+      "id": 11,
+      "url": "https://docs.kalshi.com/api-reference/orders/create-order-v2",
+      "title": "Kalshi API Reference: Create Order V2",
+      "accessed": "2026-08-04"
+    }
+  ]
+}

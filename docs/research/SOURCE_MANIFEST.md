@@ -16,7 +16,8 @@
 - Historical data: https://docs.kalshi.com/getting_started/historical_data
 - Rate limits: https://docs.kalshi.com/getting_started/rate_limits
 - WebSockets: https://docs.kalshi.com/getting_started/quick_start_websockets
-- SDK guidance: https://docs.kalshi.com/getting_started/kalshi_sdks
+- SDK guidance: https://docs.kalshi.com/sdks/overview
+- Current event-order V2 reference: https://docs.kalshi.com/api-reference/orders/create-order-v2
 - OpenAPI source of truth: https://docs.kalshi.com/openapi.yaml
 - AsyncAPI source of truth: https://docs.kalshi.com/asyncapi.yaml
 

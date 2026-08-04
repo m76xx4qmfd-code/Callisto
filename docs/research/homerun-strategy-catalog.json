@@ -1,0 +1,240 @@
+{
+  "reviewed_commit": "389d24699479daf102bfa9c22882375ca9ebb07a",
+  "count": 30,
+  "strategies": [
+    {
+      "module": "backend/services/strategies/btc_eth_convergence.py",
+      "class": "BtcEthConvergenceStrategy",
+      "strategy_type": "btc_eth_convergence",
+      "name": "BTC/ETH Convergence",
+      "description": "Near-expiry convergence maker on BTC/ETH/SOL/XRP up-or-down markets \u2014 places a maker order on the oracle-predicted winning side at $0.85-$0.95 in the final 5-45s before resolution",
+      "mispricing_type": "within_market"
+    },
+    {
+      "module": "backend/services/strategies/btc_eth_directional_edge.py",
+      "class": "BtcEthDirectionalEdgeStrategy",
+      "strategy_type": "btc_eth_directional_edge",
+      "name": "BTC/ETH Directional Edge",
+      "description": "Oracle-gated directional taker entries on BTC/ETH/SOL/XRP up-or-down markets \u2014 fee-aware (edge must clear 2x taker fee) with regime-scaled phase thresholds",
+      "mispricing_type": "within_market"
+    },
+    {
+      "module": "backend/services/strategies/btc_eth_maker_quote.py",
+      "class": "BtcEthMakerQuoteStrategy",
+      "strategy_type": "btc_eth_maker_quote",
+      "name": "BTC/ETH Maker Quote",
+      "description": "Two-sided post_only maker quoting on BTC/ETH/SOL/XRP up-or-down markets \u2014 earns spread + maker rebates with oracle-gated inventory skew",
+      "mispricing_type": "within_market"
+    },
+    {
+      "module": "backend/services/strategies/basic.py",
+      "class": "BasicArbStrategy",
+      "strategy_type": "basic",
+      "name": "Basic Arbitrage",
+      "description": "Buy executable YES+NO pairs on the same market only when the live book locks net profit",
+      "mispricing_type": "within_market"
+    },
+    {
+      "module": "backend/services/strategies/ctf_basic_arb.py",
+      "class": "CTFBasicArbStrategy",
+      "strategy_type": "ctf_basic_arb",
+      "name": "CTF Basic Arb",
+      "description": "Immediate split/sell or buy/merge arbitrage using Polymarket CTF",
+      "mispricing_type": "within_market"
+    },
+    {
+      "module": "backend/services/strategies/certainty_shock.py",
+      "class": "CertaintyShockStrategy",
+      "strategy_type": "certainty_shock",
+      "name": "Certainty Shock",
+      "description": "Bet that recent one-sided moves near deadline extend to settlement",
+      "mispricing_type": "within_market"
+    },
+    {
+      "module": "backend/services/strategies/combinatorial.py",
+      "class": "CombinatorialStrategy",
+      "strategy_type": "combinatorial",
+      "name": "Combinatorial Arbitrage",
+      "description": "Cross-market arbitrage via integer programming",
+      "mispricing_type": "cross_market"
+    },
+    {
+      "module": "backend/services/strategies/cross_platform.py",
+      "class": "CrossPlatformStrategy",
+      "strategy_type": "cross_platform",
+      "name": "Cross-Platform Oracle",
+      "description": "Cross-platform arbitrage between Polymarket and Kalshi",
+      "mispricing_type": "cross_market"
+    },
+    {
+      "module": "backend/services/strategies/crypto_5m_midcycle.py",
+      "class": "Crypto5mMidcycleStrategy",
+      "strategy_type": "crypto_5m_midcycle",
+      "name": "Crypto 5m Midcycle",
+      "description": "At the 2:30 mark of each 5-minute crypto over-under cycle, bet on continuation when the Chainlink oracle has moved at least N bps from the cycle reference and the Polymarket book lets us buy the winning side at or below the configured VWAP entry ceiling."
+    },
+    {
+      "module": "backend/services/strategies/crypto_digital_sigma_edge.py",
+      "class": "CryptoDigitalSigmaEdgeStrategy",
+      "strategy_type": "crypto_digital_sigma_edge",
+      "name": "Crypto Digital Sigma Edge",
+      "description": "Prices each crypto up/down cycle as a cash-or-nothing digital using realized oracle volatility, then buys whichever side the book sells below fair value by more than fees \u2014 favorites and underdogs alike."
+    },
+    {
+      "module": "backend/services/strategies/crypto_distance_edge.py",
+      "class": "CryptoDistanceEdgeStrategy",
+      "strategy_type": "crypto_distance_edge",
+      "name": "Crypto Distance Edge",
+      "description": "Buys the favored side of a 15-minute crypto over-under cycle when the Chainlink oracle is far enough (in dollars) from the cycle reference AND the Polymarket book prices that side richly enough \u2014 a tiered distance($)\u2192cost(\u00a2) table where the cost floor loosens as distance grows. Holds to resolution."
+    },
+    {
+      "module": "backend/services/strategies/crypto_entropy_maker.py",
+      "class": "CryptoEntropyMakerStrategy",
+      "strategy_type": "crypto_entropy_maker",
+      "name": "Crypto Entropy Maker",
+      "description": "Canonical crypto microstructure strategy using entropy, cancel recovery, and orderflow quality.",
+      "mispricing_type": "within_market"
+    },
+    {
+      "module": "backend/services/strategies/crypto_spike_reversion.py",
+      "class": "CryptoSpikeReversionStrategy",
+      "strategy_type": "crypto_spike_reversion",
+      "name": "Crypto Spike Reversion",
+      "description": "Spike-reversion detection using live 5m/30m/2h movement context",
+      "mispricing_type": "within_market"
+    },
+    {
+      "module": "backend/services/strategies/flash_crash_reversion.py",
+      "class": "FlashCrashReversionStrategy",
+      "strategy_type": "flash_crash_reversion",
+      "name": "Flash Crash Reversion",
+      "description": "Short-horizon crash detector with liquidity/spread gating",
+      "mispricing_type": "within_market"
+    },
+    {
+      "module": "backend/services/strategies/holding_reward_yield.py",
+      "class": "HoldingRewardYieldStrategy",
+      "strategy_type": "holding_reward_yield",
+      "name": "Holding Reward Yield",
+      "description": "Earn ~4% APY from Polymarket holding rewards on long-dated markets. Capital is preserved via CTF split (YES+NO = $1) while rewards accrue.",
+      "mispricing_type": "within_market"
+    },
+    {
+      "module": "backend/services/strategies/manual_manage_hold.py",
+      "class": "ManualManageHoldStrategy",
+      "name": "Manual Manage Hold",
+      "description": "Manage manually adopted positions with downside protection while otherwise holding."
+    },
+    {
+      "module": "backend/services/strategies/market_making.py",
+      "class": "MarketMakingStrategy",
+      "strategy_type": "market_making",
+      "name": "Market Making",
+      "description": "Provide liquidity on both sides to earn the bid-ask spread",
+      "mispricing_type": "within_market"
+    },
+    {
+      "module": "backend/services/strategies/negrisk.py",
+      "class": "NegRiskStrategy",
+      "strategy_type": "negrisk",
+      "name": "NegRisk / One-of-Many",
+      "description": "Buy YES on all outcomes in verified mutually-exclusive events",
+      "mispricing_type": "within_market"
+    },
+    {
+      "module": "backend/services/strategies/news_edge.py",
+      "class": "NewsEdgeStrategy",
+      "strategy_type": "news_edge",
+      "name": "News Edge",
+      "description": "Detect news-driven mispricings via semantic matching + LLM probability estimation",
+      "mispricing_type": "news_information"
+    },
+    {
+      "module": "backend/services/strategies/news_momentum_breakout.py",
+      "class": "NewsMomentumBreakoutStrategy",
+      "strategy_type": "news_momentum_breakout",
+      "name": "News Momentum Breakout",
+      "description": "Enter on fresh upward spikes aligned with a building trend; ride with scale-outs and a breakout-invalidation stop",
+      "mispricing_type": "within_market"
+    },
+    {
+      "module": "backend/services/strategies/prob_surface_arb.py",
+      "class": "ProbSurfaceArbStrategy",
+      "strategy_type": "prob_surface_arb",
+      "name": "Probability Surface Arb",
+      "description": "Arbitrage deviations from monotonic probability surfaces across contract families",
+      "mispricing_type": "cross_market"
+    },
+    {
+      "module": "backend/services/strategies/settlement_lag.py",
+      "class": "SettlementLagStrategy",
+      "strategy_type": "settlement_lag",
+      "name": "Settlement Lag",
+      "description": "Exploit delayed price updates after outcome determination",
+      "mispricing_type": "settlement_lag"
+    },
+    {
+      "module": "backend/services/strategies/sports_overreaction_fader.py",
+      "class": "SportsOverreactionFaderStrategy",
+      "strategy_type": "sports_overreaction_fader",
+      "name": "Sports Overreaction Fader",
+      "description": "Fades rapid price overreactions in live sports markets. Enters against sharp moves and exits on partial mean-reversion.",
+      "mispricing_type": "within_market"
+    },
+    {
+      "module": "backend/services/strategies/stat_arb.py",
+      "class": "StatArbStrategy",
+      "strategy_type": "stat_arb",
+      "name": "Statistical Arbitrage",
+      "description": "Ensemble fair-probability vs market mispricing",
+      "mispricing_type": "within_market"
+    },
+    {
+      "module": "backend/services/strategies/tail_end_carry.py",
+      "class": "TailEndCarryStrategy",
+      "strategy_type": "tail_end_carry",
+      "name": "Tail-End Carry",
+      "description": "Near-expiry high-probability carry with liquidity and spread gates",
+      "mispricing_type": "within_market"
+    },
+    {
+      "module": "backend/services/strategies/temporal_decay.py",
+      "class": "TemporalDecayStrategy",
+      "strategy_type": "temporal_decay",
+      "name": "Temporal Decay",
+      "description": "Trade markets where price diverges from an expected decay curve",
+      "mispricing_type": "within_market"
+    },
+    {
+      "module": "backend/services/strategies/traders_confluence.py",
+      "class": "TradersConfluenceStrategy",
+      "strategy_type": "traders_confluence",
+      "name": "Traders Confluence",
+      "description": "Detect smart money convergence via tracked wallet confluence analysis",
+      "mispricing_type": "cross_market"
+    },
+    {
+      "module": "backend/services/strategies/traders_copy_trade.py",
+      "class": "TradersCopyTradeStrategy",
+      "strategy_type": "traders_copy_trade",
+      "name": "Traders Copy Trade",
+      "description": "Mirror tracked wallet trades in real time with explicit scope, sizing, and execution controls"
+    },
+    {
+      "module": "backend/services/strategies/vpin_toxicity.py",
+      "class": "VPINToxicityStrategy",
+      "strategy_type": "vpin_toxicity",
+      "name": "VPIN Toxicity",
+      "description": "Detect informed trading via VPIN order flow toxicity",
+      "mispricing_type": "within_market"
+    },
+    {
+      "module": "backend/services/strategies/weather_distribution.py",
+      "class": "WeatherDistributionStrategy",
+      "strategy_type": "weather_distribution",
+      "name": "Weather Distribution",
+      "description": "Full distribution comparison: build probability across all buckets, buy the most underpriced",
+      "mispricing_type": "news_information"
+    }
+  ]
+}
