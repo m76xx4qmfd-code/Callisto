@@ -1,4 +1,4 @@
-"""Current Kalshi Predictions API V2 signing and event-order transport.
+"""Current Kalshi Predictions API V2 signing, read models, and order transport.
 
 This module is intentionally isolated from Homerun's legacy ``KalshiClient``
 and from the Polymarket live executor. Importing it cannot place an order.
@@ -13,8 +13,8 @@ import base64
 import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from decimal import Decimal, InvalidOperation
-from typing import Literal
+from decimal import ROUND_DOWN, Decimal, InvalidOperation
+from typing import Literal, cast
 from urllib.parse import urlsplit
 
 import httpx
@@ -36,6 +36,10 @@ _KALSHI_APPROVED_ORIGINS = frozenset(
 )
 _EVENT_ORDERS_PATH = f"{KALSHI_API_PREFIX}/portfolio/events/orders"
 _BALANCE_PATH = f"{KALSHI_API_PREFIX}/portfolio/balance"
+_ORDERS_PATH = f"{KALSHI_API_PREFIX}/portfolio/orders"
+_FILLS_PATH = f"{KALSHI_API_PREFIX}/portfolio/fills"
+_POSITIONS_PATH = f"{KALSHI_API_PREFIX}/portfolio/positions"
+_SETTLEMENTS_PATH = f"{KALSHI_API_PREFIX}/portfolio/settlements"
 
 BookSide = Literal["bid", "ask"]
 TimeInForce = Literal["good_till_canceled", "immediate_or_cancel", "fill_or_kill"]
@@ -88,19 +92,481 @@ def _decimal(value: object, *, field: str) -> Decimal:
 
 
 def _fixed(value: Decimal, *, quantum: Decimal, field: str) -> str:
-    quantized = value.quantize(quantum)
+    value_exponent = value.as_tuple().exponent
+    quantum_exponent = quantum.as_tuple().exponent
+    if not isinstance(value_exponent, int) or not isinstance(quantum_exponent, int):
+        raise KalshiProtocolError(f"{field} must be a finite decimal")
+    if value_exponent < quantum_exponent:
+        raise KalshiProtocolError(f"{field} has more precision than Kalshi V2 permits ({quantum})")
+    try:
+        quantized = value.quantize(quantum)
+    except InvalidOperation as exc:
+        raise KalshiProtocolError(f"{field} is outside Kalshi's fixed-point range") from exc
     if quantized != value:
         raise KalshiProtocolError(f"{field} has more precision than Kalshi V2 permits ({quantum})")
     return format(quantized, "f")
 
 
 def _integer(value: object, *, field: str) -> int:
-    if isinstance(value, bool) or not isinstance(value, (int, str)):
+    if isinstance(value, bool) or not isinstance(value, int):
         raise KalshiProtocolError(f"{field} must be an integer")
+    return value
+
+
+def _required_text(payload: Mapping[str, object], key: str, *, context: str) -> str:
     try:
-        return int(value)
-    except ValueError as exc:
-        raise KalshiProtocolError(f"{field} must be an integer") from exc
+        value = payload[key]
+    except KeyError as exc:
+        raise KalshiProtocolError(f"invalid Kalshi {context} response") from exc
+    if not isinstance(value, str) or not value.strip():
+        raise KalshiProtocolError(f"{key} must be a non-empty string")
+    return value.strip()
+
+
+def _optional_text(payload: Mapping[str, object], key: str) -> str | None:
+    value = payload.get(key)
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value.strip():
+        raise KalshiProtocolError(f"{key} must be a non-empty string when present")
+    return value.strip()
+
+
+def _required_decimal(payload: Mapping[str, object], key: str, *, context: str) -> Decimal:
+    try:
+        return _decimal(payload[key], field=key)
+    except KeyError as exc:
+        raise KalshiProtocolError(f"invalid Kalshi {context} response") from exc
+
+
+def _required_fixed(
+    payload: Mapping[str, object],
+    key: str,
+    *,
+    context: str,
+    quantum: Decimal,
+) -> Decimal:
+    try:
+        raw_value = payload[key]
+    except KeyError as exc:
+        raise KalshiProtocolError(f"invalid Kalshi {context} response") from exc
+    if not isinstance(raw_value, str):
+        raise KalshiProtocolError(f"{key} must be a fixed-point string")
+    value = _required_decimal(payload, key, context=context)
+    _fixed(value, quantum=quantum, field=key)
+    return value
+
+
+def _optional_integer(payload: Mapping[str, object], key: str) -> int | None:
+    value = payload.get(key)
+    if value is None:
+        return None
+    return _integer(value, field=key)
+
+
+def _strict_bool(value: object, *, field: str) -> bool:
+    if not isinstance(value, bool):
+        raise KalshiProtocolError(f"{field} must be a boolean")
+    return value
+
+
+def _validate_page_query(
+    *,
+    limit: int,
+    cursor: str | None,
+    subaccount: int | None,
+    min_ts: int | None = None,
+    max_ts: int | None = None,
+) -> dict[str, str | int]:
+    if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 1000:
+        raise KalshiProtocolError("limit must be an integer between 1 and 1000")
+    params: dict[str, str | int] = {"limit": limit}
+    if cursor is not None:
+        cursor = cursor.strip()
+        if not cursor:
+            raise KalshiProtocolError("cursor cannot be empty when provided")
+        params["cursor"] = cursor
+    if subaccount is not None:
+        if isinstance(subaccount, bool) or not isinstance(subaccount, int) or not 0 <= subaccount <= 63:
+            raise KalshiProtocolError("subaccount must be an integer between 0 and 63")
+        params["subaccount"] = subaccount
+    for name, value in (("min_ts", min_ts), ("max_ts", max_ts)):
+        if value is not None:
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                raise KalshiProtocolError(f"{name} must be a non-negative integer")
+            params[name] = value
+    if min_ts is not None and max_ts is not None and min_ts > max_ts:
+        raise KalshiProtocolError("min_ts cannot be greater than max_ts")
+    return params
+
+
+def _add_text_query(params: dict[str, str | int], name: str, value: str | None) -> None:
+    if value is None:
+        return
+    value = value.strip()
+    if not value:
+        raise KalshiProtocolError(f"{name} cannot be empty when provided")
+    params[name] = value
+
+
+@dataclass(frozen=True)
+class KalshiOrder:
+    order_id: str
+    user_id: str
+    client_order_id: str
+    ticker: str
+    outcome_side: Literal["yes", "no"]
+    book_side: BookSide
+    order_type: Literal["limit", "market"]
+    status: Literal["resting", "canceled", "executed"]
+    yes_price: Decimal
+    no_price: Decimal
+    fill_count: Decimal
+    remaining_count: Decimal
+    initial_count: Decimal
+    taker_fees: Decimal
+    maker_fees: Decimal
+    taker_fill_cost: Decimal
+    maker_fill_cost: Decimal
+    created_time: str | None
+    last_update_time: str | None
+    expiration_time: str | None
+    subaccount_number: int | None
+    exchange_index: int | None
+
+    @classmethod
+    def from_payload(cls, payload: Mapping[str, object]) -> KalshiOrder:
+        outcome_side = _required_text(payload, "outcome_side", context="order")
+        book_side = _required_text(payload, "book_side", context="order")
+        order_type = _required_text(payload, "type", context="order")
+        status = _required_text(payload, "status", context="order")
+        if outcome_side not in {"yes", "no"}:
+            raise KalshiProtocolError("outcome_side must be 'yes' or 'no'")
+        if book_side not in {"bid", "ask"}:
+            raise KalshiProtocolError("book_side must be 'bid' or 'ask'")
+        if (outcome_side == "yes") != (book_side == "bid"):
+            raise KalshiProtocolError("outcome_side and book_side are inconsistent")
+        if order_type not in {"limit", "market"}:
+            raise KalshiProtocolError("type must be 'limit' or 'market'")
+        if status not in {"resting", "canceled", "executed"}:
+            raise KalshiProtocolError("invalid order status")
+        values = {
+            name: _required_fixed(
+                payload,
+                wire_name,
+                context="order",
+                quantum=(Decimal("0.01") if "count" in wire_name else Decimal("0.000001")),
+            )
+            for name, wire_name in {
+                "yes_price": "yes_price_dollars",
+                "no_price": "no_price_dollars",
+                "fill_count": "fill_count_fp",
+                "remaining_count": "remaining_count_fp",
+                "initial_count": "initial_count_fp",
+                "taker_fees": "taker_fees_dollars",
+                "maker_fees": "maker_fees_dollars",
+                "taker_fill_cost": "taker_fill_cost_dollars",
+                "maker_fill_cost": "maker_fill_cost_dollars",
+            }.items()
+        }
+        if not 0 <= values["yes_price"] <= 1 or not 0 <= values["no_price"] <= 1:
+            raise KalshiProtocolError("order prices must be between 0 and 1")
+        if values["yes_price"] + values["no_price"] != 1:
+            raise KalshiProtocolError("order yes and no prices must sum to 1")
+        if any(value < 0 for name, value in values.items() if name not in {"yes_price", "no_price"}):
+            raise KalshiProtocolError("order counts, fees, and costs cannot be negative")
+        subaccount = _optional_integer(payload, "subaccount_number")
+        exchange_index = _optional_integer(payload, "exchange_index")
+        if subaccount is not None and not 0 <= subaccount <= 63:
+            raise KalshiProtocolError("subaccount_number must be between 0 and 63")
+        if exchange_index is not None and exchange_index < -1:
+            raise KalshiProtocolError("exchange_index cannot be less than -1")
+        return cls(
+            order_id=_required_text(payload, "order_id", context="order"),
+            user_id=_required_text(payload, "user_id", context="order"),
+            client_order_id=_required_text(payload, "client_order_id", context="order"),
+            ticker=_required_text(payload, "ticker", context="order"),
+            outcome_side=cast(Literal["yes", "no"], outcome_side),
+            book_side=cast(BookSide, book_side),
+            order_type=cast(Literal["limit", "market"], order_type),
+            status=cast(Literal["resting", "canceled", "executed"], status),
+            created_time=_optional_text(payload, "created_time"),
+            last_update_time=_optional_text(payload, "last_update_time"),
+            expiration_time=_optional_text(payload, "expiration_time"),
+            subaccount_number=subaccount,
+            exchange_index=exchange_index,
+            **values,
+        )
+
+
+@dataclass(frozen=True)
+class KalshiOrdersPage:
+    orders: tuple[KalshiOrder, ...]
+    cursor: str
+
+    @classmethod
+    def from_payload(cls, payload: Mapping[str, object]) -> KalshiOrdersPage:
+        orders = payload.get("orders")
+        if not isinstance(orders, list):
+            raise KalshiProtocolError("invalid Kalshi orders response")
+        cursor = payload.get("cursor")
+        if not isinstance(cursor, str):
+            raise KalshiProtocolError("orders cursor must be a string")
+        if not all(isinstance(item, dict) for item in orders):
+            raise KalshiProtocolError("invalid Kalshi order entry")
+        return cls(orders=tuple(KalshiOrder.from_payload(item) for item in orders), cursor=cursor)
+
+
+@dataclass(frozen=True)
+class KalshiFill:
+    fill_id: str
+    trade_id: str
+    order_id: str
+    ticker: str
+    market_ticker: str
+    outcome_side: Literal["yes", "no"]
+    book_side: BookSide
+    count: Decimal
+    yes_price: Decimal
+    no_price: Decimal
+    is_taker: bool
+    fee_cost: Decimal
+    created_time: str | None
+    subaccount_number: int | None
+    ts: int | None
+
+    @classmethod
+    def from_payload(cls, payload: Mapping[str, object]) -> KalshiFill:
+        outcome_side = _required_text(payload, "outcome_side", context="fill")
+        book_side = _required_text(payload, "book_side", context="fill")
+        if outcome_side not in {"yes", "no"}:
+            raise KalshiProtocolError("outcome_side must be 'yes' or 'no'")
+        if book_side not in {"bid", "ask"}:
+            raise KalshiProtocolError("book_side must be 'bid' or 'ask'")
+        if (outcome_side == "yes") != (book_side == "bid"):
+            raise KalshiProtocolError("outcome_side and book_side are inconsistent")
+        count = _required_fixed(payload, "count_fp", context="fill", quantum=Decimal("0.01"))
+        yes_price = _required_fixed(payload, "yes_price_dollars", context="fill", quantum=Decimal("0.000001"))
+        no_price = _required_fixed(payload, "no_price_dollars", context="fill", quantum=Decimal("0.000001"))
+        fee_cost = _required_fixed(payload, "fee_cost", context="fill", quantum=Decimal("0.000001"))
+        if count < 0 or fee_cost < 0 or not 0 <= yes_price <= 1 or not 0 <= no_price <= 1:
+            raise KalshiProtocolError("invalid numeric values in Kalshi fill")
+        if yes_price + no_price != 1:
+            raise KalshiProtocolError("fill yes and no prices must sum to 1")
+        try:
+            is_taker = _strict_bool(payload["is_taker"], field="is_taker")
+        except KeyError as exc:
+            raise KalshiProtocolError("invalid Kalshi fill response") from exc
+        subaccount = _optional_integer(payload, "subaccount_number")
+        if subaccount is not None and not 0 <= subaccount <= 63:
+            raise KalshiProtocolError("subaccount_number must be between 0 and 63")
+        fill_id = _required_text(payload, "fill_id", context="fill")
+        trade_id = _required_text(payload, "trade_id", context="fill")
+        ticker = _required_text(payload, "ticker", context="fill")
+        market_ticker = _required_text(payload, "market_ticker", context="fill")
+        if fill_id != trade_id:
+            raise KalshiProtocolError("fill_id and trade_id must match")
+        if ticker != market_ticker:
+            raise KalshiProtocolError("ticker and market_ticker must match")
+        return cls(
+            fill_id=fill_id,
+            trade_id=trade_id,
+            order_id=_required_text(payload, "order_id", context="fill"),
+            ticker=ticker,
+            market_ticker=market_ticker,
+            outcome_side=cast(Literal["yes", "no"], outcome_side),
+            book_side=cast(BookSide, book_side),
+            count=count,
+            yes_price=yes_price,
+            no_price=no_price,
+            is_taker=is_taker,
+            fee_cost=fee_cost,
+            created_time=_optional_text(payload, "created_time"),
+            subaccount_number=subaccount,
+            ts=_optional_integer(payload, "ts"),
+        )
+
+
+@dataclass(frozen=True)
+class KalshiFillsPage:
+    fills: tuple[KalshiFill, ...]
+    cursor: str
+
+    @classmethod
+    def from_payload(cls, payload: Mapping[str, object]) -> KalshiFillsPage:
+        fills = payload.get("fills")
+        if not isinstance(fills, list):
+            raise KalshiProtocolError("invalid Kalshi fills response")
+        cursor = payload.get("cursor")
+        if not isinstance(cursor, str):
+            raise KalshiProtocolError("fills cursor must be a string")
+        if not all(isinstance(item, dict) for item in fills):
+            raise KalshiProtocolError("invalid Kalshi fill entry")
+        return cls(fills=tuple(KalshiFill.from_payload(item) for item in fills), cursor=cursor)
+
+
+@dataclass(frozen=True)
+class KalshiMarketPosition:
+    ticker: str
+    total_traded: Decimal
+    position: Decimal
+    market_exposure: Decimal
+    realized_pnl: Decimal
+    fees_paid: Decimal
+    last_updated_ts: str
+
+    @classmethod
+    def from_payload(cls, payload: Mapping[str, object]) -> KalshiMarketPosition:
+        try:
+            return cls(
+                ticker=_required_text(payload, "ticker", context="market position"),
+                total_traded=_required_fixed(
+                    payload, "total_traded_dollars", context="market position", quantum=Decimal("0.000001")
+                ),
+                position=_required_fixed(payload, "position_fp", context="market position", quantum=Decimal("0.01")),
+                market_exposure=_required_fixed(
+                    payload, "market_exposure_dollars", context="market position", quantum=Decimal("0.000001")
+                ),
+                realized_pnl=_required_fixed(
+                    payload, "realized_pnl_dollars", context="market position", quantum=Decimal("0.000001")
+                ),
+                fees_paid=_required_fixed(
+                    payload, "fees_paid_dollars", context="market position", quantum=Decimal("0.000001")
+                ),
+                last_updated_ts=_required_text(payload, "last_updated_ts", context="market position"),
+            )
+        except KalshiProtocolError as exc:
+            if "market position" in str(exc):
+                raise
+            raise KalshiProtocolError(f"invalid Kalshi market position response: {exc}") from exc
+
+
+@dataclass(frozen=True)
+class KalshiEventPosition:
+    event_ticker: str
+    total_cost: Decimal
+    total_cost_shares: Decimal
+    event_exposure: Decimal
+    realized_pnl: Decimal
+    fees_paid: Decimal
+
+    @classmethod
+    def from_payload(cls, payload: Mapping[str, object]) -> KalshiEventPosition:
+        return cls(
+            event_ticker=_required_text(payload, "event_ticker", context="event position"),
+            total_cost=_required_fixed(
+                payload, "total_cost_dollars", context="event position", quantum=Decimal("0.000001")
+            ),
+            total_cost_shares=_required_fixed(
+                payload, "total_cost_shares_fp", context="event position", quantum=Decimal("0.01")
+            ),
+            event_exposure=_required_fixed(
+                payload, "event_exposure_dollars", context="event position", quantum=Decimal("0.000001")
+            ),
+            realized_pnl=_required_fixed(
+                payload, "realized_pnl_dollars", context="event position", quantum=Decimal("0.000001")
+            ),
+            fees_paid=_required_fixed(
+                payload, "fees_paid_dollars", context="event position", quantum=Decimal("0.000001")
+            ),
+        )
+
+
+@dataclass(frozen=True)
+class KalshiPositionsPage:
+    market_positions: tuple[KalshiMarketPosition, ...]
+    event_positions: tuple[KalshiEventPosition, ...]
+    cursor: str
+
+    @classmethod
+    def from_payload(cls, payload: Mapping[str, object]) -> KalshiPositionsPage:
+        markets = payload.get("market_positions")
+        events = payload.get("event_positions")
+        cursor = payload.get("cursor", "")
+        if not isinstance(markets, list) or not all(isinstance(item, dict) for item in markets):
+            raise KalshiProtocolError("invalid Kalshi market positions response")
+        if not isinstance(events, list) or not all(isinstance(item, dict) for item in events):
+            raise KalshiProtocolError("invalid Kalshi event positions response")
+        if not isinstance(cursor, str):
+            raise KalshiProtocolError("positions cursor must be a string")
+        return cls(
+            market_positions=tuple(KalshiMarketPosition.from_payload(item) for item in markets),
+            event_positions=tuple(KalshiEventPosition.from_payload(item) for item in events),
+            cursor=cursor,
+        )
+
+
+@dataclass(frozen=True)
+class KalshiSettlement:
+    ticker: str
+    event_ticker: str
+    market_result: Literal["yes", "no", "scalar"]
+    yes_count: Decimal
+    yes_total_cost: Decimal
+    no_count: Decimal
+    no_total_cost: Decimal
+    revenue_cents: int
+    settled_time: str
+    fee_cost: Decimal
+    settlement_value_cents: int | None
+
+    @classmethod
+    def from_payload(cls, payload: Mapping[str, object]) -> KalshiSettlement:
+        market_result = _required_text(payload, "market_result", context="settlement")
+        if market_result not in {"yes", "no", "scalar"}:
+            raise KalshiProtocolError("market_result must be yes, no, or scalar")
+        try:
+            revenue = _integer(payload["revenue"], field="revenue")
+        except KeyError as exc:
+            raise KalshiProtocolError("invalid Kalshi settlement response") from exc
+        values = {
+            name: _required_fixed(
+                payload,
+                wire_name,
+                context="settlement",
+                quantum=(Decimal("0.01") if wire_name.endswith("_fp") else Decimal("0.000001")),
+            )
+            for name, wire_name in {
+                "yes_count": "yes_count_fp",
+                "yes_total_cost": "yes_total_cost_dollars",
+                "no_count": "no_count_fp",
+                "no_total_cost": "no_total_cost_dollars",
+                "fee_cost": "fee_cost",
+            }.items()
+        }
+        if revenue < 0 or any(value < 0 for value in values.values()):
+            raise KalshiProtocolError("settlement counts, costs, fees, and revenue cannot be negative")
+        settlement_value = _optional_integer(payload, "value")
+        if settlement_value is not None and not 0 <= settlement_value <= 100:
+            raise KalshiProtocolError("settlement value must be between 0 and 100 cents")
+        return cls(
+            ticker=_required_text(payload, "ticker", context="settlement"),
+            event_ticker=_required_text(payload, "event_ticker", context="settlement"),
+            market_result=cast(Literal["yes", "no", "scalar"], market_result),
+            revenue_cents=revenue,
+            settled_time=_required_text(payload, "settled_time", context="settlement"),
+            settlement_value_cents=settlement_value,
+            **values,
+        )
+
+
+@dataclass(frozen=True)
+class KalshiSettlementsPage:
+    settlements: tuple[KalshiSettlement, ...]
+    cursor: str
+
+    @classmethod
+    def from_payload(cls, payload: Mapping[str, object]) -> KalshiSettlementsPage:
+        settlements = payload.get("settlements")
+        cursor = payload.get("cursor", "")
+        if not isinstance(settlements, list) or not all(isinstance(item, dict) for item in settlements):
+            raise KalshiProtocolError("invalid Kalshi settlements response")
+        if not isinstance(cursor, str):
+            raise KalshiProtocolError("settlements cursor must be a string")
+        return cls(
+            settlements=tuple(KalshiSettlement.from_payload(item) for item in settlements),
+            cursor=cursor,
+        )
 
 
 @dataclass(frozen=True)
@@ -121,11 +587,16 @@ class KalshiBalanceSnapshot:
     def from_payload(cls, payload: Mapping[str, object]) -> KalshiBalanceSnapshot:
         try:
             balance_cents = _integer(payload["balance"], field="balance")
-            balance_dollars = _decimal(payload["balance_dollars"], field="balance_dollars")
             portfolio_value_cents = _integer(payload["portfolio_value"], field="portfolio_value")
             updated_ts = _integer(payload["updated_ts"], field="updated_ts")
         except KeyError as exc:
             raise KalshiProtocolError("invalid Kalshi balance response") from exc
+        balance_dollars = _required_fixed(
+            payload,
+            "balance_dollars",
+            context="balance",
+            quantum=Decimal("0.000001"),
+        )
 
         raw_breakdown = payload.get("balance_breakdown", [])
         if not isinstance(raw_breakdown, list):
@@ -136,11 +607,18 @@ class KalshiBalanceSnapshot:
                 raise KalshiProtocolError("invalid balance_breakdown entry")
             try:
                 exchange_index = _integer(entry["exchange_index"], field="exchange_index")
-                balance = _decimal(entry["balance"], field="breakdown balance")
             except KeyError as exc:
                 raise KalshiProtocolError("invalid balance_breakdown entry") from exc
+            balance = _required_fixed(
+                entry,
+                "balance",
+                context="balance_breakdown entry",
+                quantum=Decimal("0.000001"),
+            )
             if exchange_index < 0:
                 raise KalshiProtocolError("exchange_index cannot be negative")
+            if balance < 0:
+                raise KalshiProtocolError("breakdown balance cannot be negative")
             breakdown.append(
                 KalshiSubaccountBalance(
                     exchange_index=exchange_index,
@@ -150,6 +628,11 @@ class KalshiBalanceSnapshot:
 
         if balance_cents < 0 or portfolio_value_cents < 0 or updated_ts <= 0:
             raise KalshiProtocolError("invalid values in Kalshi balance response")
+        if balance_dollars < 0:
+            raise KalshiProtocolError("balance_dollars cannot be negative")
+        balance_dollars_in_cents = (balance_dollars * 100).to_integral_value(rounding=ROUND_DOWN)
+        if balance_dollars_in_cents != balance_cents:
+            raise KalshiProtocolError("balance_dollars does not match balance cents")
         return cls(
             balance_cents=balance_cents,
             balance_dollars=balance_dollars,
@@ -345,7 +828,7 @@ class KalshiRequestSigner:
 
 
 class KalshiV2Client:
-    """Minimal current V2 event-order transport with fail-closed write arming.
+    """Authenticated V2 portfolio reads and event orders with fail-closed writes.
 
     This class performs no automatic POST retry. A transport failure becomes
     ``KalshiSubmissionUnknown`` so callers must reconcile by
@@ -379,30 +862,174 @@ class KalshiV2Client:
         if self._owns_http and not self._http.is_closed:
             await self._http.aclose()
 
-    async def get_balance(self) -> KalshiBalanceSnapshot:
-        """Return the authenticated account balance without enabling writes."""
-
+    async def _signed_get_json(
+        self,
+        *,
+        path: str,
+        params: Mapping[str, str | int] | None = None,
+        response_name: str,
+    ) -> Mapping[str, object]:
         timestamp_ms = self._now_ms()
         headers = {
             **self._signer.headers(
                 timestamp_ms=timestamp_ms,
                 method="GET",
-                path=_BALANCE_PATH,
+                path=path,
             ),
             "Accept": "application/json",
         }
         response = await self._http.get(
-            f"{self._origin}{_BALANCE_PATH}",
+            f"{self._origin}{path}",
             headers=headers,
+            params=params,
         )
         response.raise_for_status()
         try:
             payload = response.json()
         except ValueError as exc:
-            raise KalshiProtocolError("Kalshi balance response was not JSON") from exc
+            raise KalshiProtocolError(f"Kalshi {response_name} response was not JSON") from exc
         if not isinstance(payload, dict):
-            raise KalshiProtocolError("Kalshi balance response must be an object")
+            raise KalshiProtocolError(f"Kalshi {response_name} response must be an object")
+        return payload
+
+    async def get_balance(self) -> KalshiBalanceSnapshot:
+        """Return the authenticated account balance without enabling writes."""
+
+        payload = await self._signed_get_json(
+            path=_BALANCE_PATH,
+            response_name="balance",
+        )
         return KalshiBalanceSnapshot.from_payload(payload)
+
+    async def get_orders(
+        self,
+        *,
+        ticker: str | None = None,
+        event_tickers: tuple[str, ...] = (),
+        status: Literal["resting", "canceled", "executed"] | None = None,
+        min_ts: int | None = None,
+        max_ts: int | None = None,
+        limit: int = 100,
+        cursor: str | None = None,
+        subaccount: int | None = None,
+    ) -> KalshiOrdersPage:
+        """Return one authoritative page of current or historical orders."""
+
+        params = _validate_page_query(
+            limit=limit,
+            cursor=cursor,
+            subaccount=subaccount,
+            min_ts=min_ts,
+            max_ts=max_ts,
+        )
+        _add_text_query(params, "ticker", ticker)
+        if len(event_tickers) > 10:
+            raise KalshiProtocolError("event_tickers cannot contain more than 10 values")
+        if event_tickers:
+            normalized = tuple(value.strip() for value in event_tickers)
+            if any(not value for value in normalized):
+                raise KalshiProtocolError("event_tickers cannot contain empty values")
+            params["event_ticker"] = ",".join(normalized)
+        if status is not None:
+            if status not in {"resting", "canceled", "executed"}:
+                raise KalshiProtocolError("status must be resting, canceled, or executed")
+            params["status"] = status
+        payload = await self._signed_get_json(
+            path=_ORDERS_PATH,
+            params=params,
+            response_name="orders",
+        )
+        return KalshiOrdersPage.from_payload(payload)
+
+    async def get_fills(
+        self,
+        *,
+        ticker: str | None = None,
+        order_id: str | None = None,
+        min_ts: int | None = None,
+        max_ts: int | None = None,
+        limit: int = 100,
+        cursor: str | None = None,
+        subaccount: int | None = None,
+    ) -> KalshiFillsPage:
+        """Return one authoritative page of user fills."""
+
+        params = _validate_page_query(
+            limit=limit,
+            cursor=cursor,
+            subaccount=subaccount,
+            min_ts=min_ts,
+            max_ts=max_ts,
+        )
+        _add_text_query(params, "ticker", ticker)
+        _add_text_query(params, "order_id", order_id)
+        payload = await self._signed_get_json(
+            path=_FILLS_PATH,
+            params=params,
+            response_name="fills",
+        )
+        return KalshiFillsPage.from_payload(payload)
+
+    async def get_positions(
+        self,
+        *,
+        cursor: str | None = None,
+        limit: int = 100,
+        count_filter: tuple[Literal["position", "total_traded"], ...] = (),
+        ticker: str | None = None,
+        event_ticker: str | None = None,
+        subaccount: int = 0,
+    ) -> KalshiPositionsPage:
+        """Return one page of market and event positions for a subaccount."""
+
+        params = _validate_page_query(
+            limit=limit,
+            cursor=cursor,
+            subaccount=subaccount,
+        )
+        _add_text_query(params, "ticker", ticker)
+        _add_text_query(params, "event_ticker", event_ticker)
+        if count_filter:
+            if any(value not in {"position", "total_traded"} for value in count_filter):
+                raise KalshiProtocolError("count_filter values must be position or total_traded")
+            if len(set(count_filter)) != len(count_filter):
+                raise KalshiProtocolError("count_filter values cannot be duplicated")
+            params["count_filter"] = ",".join(count_filter)
+        payload = await self._signed_get_json(
+            path=_POSITIONS_PATH,
+            params=params,
+            response_name="positions",
+        )
+        return KalshiPositionsPage.from_payload(payload)
+
+    async def get_settlements(
+        self,
+        *,
+        limit: int = 100,
+        cursor: str | None = None,
+        ticker: str | None = None,
+        event_ticker: str | None = None,
+        min_ts: int | None = None,
+        max_ts: int | None = None,
+        subaccount: int | None = None,
+    ) -> KalshiSettlementsPage:
+        """Return one authoritative page of historical settlements."""
+
+        params = _validate_page_query(
+            limit=limit,
+            cursor=cursor,
+            subaccount=subaccount,
+            min_ts=min_ts,
+            max_ts=max_ts,
+        )
+        _add_text_query(params, "ticker", ticker)
+        _add_text_query(params, "event_ticker", event_ticker)
+        payload = await self._signed_get_json(
+            path=_SETTLEMENTS_PATH,
+            params=params,
+            response_name="settlements",
+        )
+        return KalshiSettlementsPage.from_payload(payload)
 
     async def create_order(self, order: KalshiEventOrderRequest) -> KalshiOrderAcknowledgement:
         if not self._allow_writes:

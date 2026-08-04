@@ -221,6 +221,29 @@ async def test_get_balance_is_signed_read_only_and_parses_fixed_point_fields(
     assert sent.headers["KALSHI-ACCESS-TIMESTAMP"] == "1725000000123"
 
 
+def test_balance_parser_rejects_noncanonical_wire_types() -> None:
+    payload: dict[str, object] = {
+        "balance": 12345,
+        "balance_dollars": "123.4500",
+        "portfolio_value": 13000,
+        "updated_ts": 1_725_000_000_456,
+        "balance_breakdown": [{"exchange_index": 0, "balance": "123.4500"}],
+    }
+
+    with pytest.raises(KalshiProtocolError, match="balance_dollars"):
+        KalshiBalanceSnapshot.from_payload({**payload, "balance_dollars": 123.45})
+    with pytest.raises(KalshiProtocolError, match="balance must be an integer"):
+        KalshiBalanceSnapshot.from_payload({**payload, "balance": "12345"})
+    with pytest.raises(KalshiProtocolError, match="cannot be negative"):
+        KalshiBalanceSnapshot.from_payload({**payload, "balance_dollars": "-123.4500"})
+    with pytest.raises(KalshiProtocolError, match="does not match"):
+        KalshiBalanceSnapshot.from_payload({**payload, "balance_dollars": "123.4400"})
+    with pytest.raises(KalshiProtocolError, match="breakdown balance cannot be negative"):
+        KalshiBalanceSnapshot.from_payload(
+            {**payload, "balance_breakdown": [{"exchange_index": 0, "balance": "-1.0000"}]}
+        )
+
+
 @pytest.mark.asyncio
 async def test_create_order_is_blocked_until_writes_are_explicitly_armed(private_key_pem: str) -> None:
     calls = 0
