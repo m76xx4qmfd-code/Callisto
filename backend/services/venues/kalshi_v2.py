@@ -10,6 +10,7 @@ runtime in this foundation increment.
 from __future__ import annotations
 
 import base64
+import hashlib
 import re
 import time
 from collections.abc import Callable, Mapping
@@ -923,10 +924,19 @@ class KalshiV2Client:
             raise KalshiProtocolError("credentials may only be sent to an approved Kalshi origin")
         self._origin = origin
         self._signer = KalshiRequestSigner(key_id=key_id, private_key_pem=private_key_pem)
+        origin_bytes = origin.encode()
+        fingerprint_material = str(len(origin_bytes)).encode() + b":" + origin_bytes + self._signer.key_id.encode()
+        self._principal_fingerprint = hashlib.sha256(fingerprint_material).hexdigest()
         self._http = http_client or httpx.AsyncClient(timeout=30.0)
         self._owns_http = http_client is None
         self._allow_writes = allow_writes
         self._now_ms = now_ms or (lambda: time.time_ns() // 1_000_000)
+
+    @property
+    def principal_fingerprint(self) -> str:
+        """Return an opaque credential-and-origin identity without exposing the key ID."""
+
+        return self._principal_fingerprint
 
     async def close(self) -> None:
         if self._owns_http and not self._http.is_closed:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 from decimal import Decimal
 
@@ -32,6 +33,17 @@ def private_key_pem() -> str:
         format=serialization.PrivateFormat.PKCS8,
         encryption_algorithm=serialization.NoEncryption(),
     ).decode("ascii")
+
+
+def test_client_exposes_only_an_opaque_origin_bound_principal_fingerprint(private_key_pem: str) -> None:
+    client = KalshiV2Client(key_id="key-id", private_key_pem=private_key_pem)
+
+    origin = b"https://external-api.kalshi.com"
+    assert (
+        client.principal_fingerprint
+        == hashlib.sha256(str(len(origin)).encode() + b":" + origin + b"key-id").hexdigest()
+    )
+    assert "key-id" not in client.principal_fingerprint
 
 
 def test_request_signer_uses_rsa_pss_and_excludes_query(private_key_pem: str) -> None:
