@@ -20,4 +20,4 @@ Callisto is a Kalshi-first prediction-market research, strategy, paper-trading, 
 
 ## Current phase
 
-The AGPL fork baseline is established. The first engineering phase is to introduce a Kalshi-native venue boundary and current V2 API support before enabling live execution. See `docs/research/`.
+The AGPL fork baseline is established. The first Kalshi V2 foundation now provides RSA-PSS signing, exact fixed-point event-order wire models, a venue-neutral order intent, fail-closed write arming, non-retrying ambiguous-submission handling, and signed read-only balance access. It is not connected to a live execution route or worker. See `docs/architecture/KALSHI_V2_FOUNDATION_PLAN.md` and `docs/research/`.
