@@ -3184,6 +3184,136 @@ class VenueProviderAcknowledgementRecord(Base):
     )
 
 
+class KalshiPortfolioOrderIdentity(Base):
+    """Immutable identity-bearing fields for one principal-scoped Kalshi order."""
+
+    __tablename__ = "kalshi_portfolio_order_identities"
+
+    principal_fingerprint = Column(String(64), primary_key=True)
+    order_id = Column(String, primary_key=True)
+    identity_hash = Column(String(64), nullable=False)
+    identity_json = Column(JSON, nullable=False)
+    first_observed_at = Column(DateTime, nullable=False)
+
+    __table_args__ = (
+        CheckConstraint(
+            "principal_fingerprint ~ '^[0-9a-f]{64}$'",
+            name="ck_kalshi_coverage_identity_principal",
+        ),
+        CheckConstraint("length(btrim(order_id)) > 0", name="ck_kalshi_coverage_identity_order"),
+        CheckConstraint("identity_hash ~ '^[0-9a-f]{64}$'", name="ck_kalshi_coverage_identity_hash"),
+    )
+
+
+class KalshiPortfolioOrderObservation(Base):
+    """Canonical immutable Kalshi order snapshot observed by a coverage sweep."""
+
+    __tablename__ = "kalshi_portfolio_order_observations"
+
+    principal_fingerprint = Column(String(64), primary_key=True)
+    order_id = Column(String, primary_key=True)
+    evidence_hash = Column(String(64), primary_key=True)
+    payload_json = Column(JSON, nullable=False)
+    provider_updated_at = Column(DateTime, nullable=False)
+    first_observed_at = Column(DateTime, nullable=False)
+
+    __table_args__ = (
+        CheckConstraint(
+            "principal_fingerprint ~ '^[0-9a-f]{64}$'",
+            name="ck_kalshi_coverage_order_principal",
+        ),
+        CheckConstraint("length(btrim(order_id)) > 0", name="ck_kalshi_coverage_order_id"),
+        CheckConstraint("evidence_hash ~ '^[0-9a-f]{64}$'", name="ck_kalshi_coverage_order_hash"),
+        Index("idx_kalshi_coverage_orders_observed", "first_observed_at"),
+    )
+
+
+class KalshiPortfolioFillObservation(Base):
+    """Canonical immutable Kalshi fill evidence keyed by provider fill identity."""
+
+    __tablename__ = "kalshi_portfolio_fill_observations"
+
+    principal_fingerprint = Column(String(64), primary_key=True)
+    fill_id = Column(String, primary_key=True)
+    evidence_hash = Column(String(64), nullable=False)
+    order_id = Column(String, nullable=False)
+    payload_json = Column(JSON, nullable=False)
+    provider_created_at = Column(DateTime, nullable=False)
+    first_observed_at = Column(DateTime, nullable=False)
+
+    __table_args__ = (
+        CheckConstraint(
+            "principal_fingerprint ~ '^[0-9a-f]{64}$'",
+            name="ck_kalshi_coverage_fill_principal",
+        ),
+        CheckConstraint("length(btrim(fill_id)) > 0", name="ck_kalshi_coverage_fill_id"),
+        CheckConstraint("length(btrim(order_id)) > 0", name="ck_kalshi_coverage_fill_order_id"),
+        CheckConstraint("evidence_hash ~ '^[0-9a-f]{64}$'", name="ck_kalshi_coverage_fill_hash"),
+        Index("idx_kalshi_coverage_fills_order", "order_id"),
+        Index("idx_kalshi_coverage_fills_observed", "first_observed_at"),
+    )
+
+
+class KalshiPortfolioCoverageCheckpoint(Base):
+    """Immutable terminal result of one caller-stable authenticated-principal sweep."""
+
+    __tablename__ = "kalshi_portfolio_coverage_checkpoints"
+
+    principal_fingerprint = Column(String(64), primary_key=True)
+    coverage_id = Column(String, primary_key=True)
+    observed_at = Column(DateTime, nullable=False)
+    orders_cutoff_before = Column(DateTime, nullable=False)
+    orders_cutoff_after = Column(DateTime, nullable=False)
+    fills_cutoff_before = Column(DateTime, nullable=False)
+    fills_cutoff_after = Column(DateTime, nullable=False)
+    current_orders_pages = Column(Integer, nullable=False)
+    current_fills_pages = Column(Integer, nullable=False)
+    historical_orders_pages = Column(Integer, nullable=False)
+    historical_fills_pages = Column(Integer, nullable=False)
+    current_orders_unique = Column(Integer, nullable=False)
+    current_fills_unique = Column(Integer, nullable=False)
+    historical_orders_unique = Column(Integer, nullable=False)
+    historical_fills_unique = Column(Integer, nullable=False)
+    orders_unique = Column(Integer, nullable=False)
+    fills_unique = Column(Integer, nullable=False)
+    observed_evidence_hash = Column(String(64), nullable=False)
+    unknown_order_ids_json = Column(JSON, nullable=False)
+    unknown_client_order_ids_json = Column(JSON, nullable=False)
+    unknown_fill_ids_json = Column(JSON, nullable=False)
+    status = Column(String, nullable=False)
+    reason = Column(String, nullable=False)
+    retry_allowed = Column(Boolean, nullable=False, default=False, server_default="false")
+    created_at = Column(DateTime, default=_utcnow, nullable=False)
+
+    __table_args__ = (
+        CheckConstraint(
+            "principal_fingerprint ~ '^[0-9a-f]{64}$'",
+            name="ck_kalshi_coverage_checkpoint_principal",
+        ),
+        CheckConstraint("length(btrim(coverage_id)) > 0", name="ck_kalshi_coverage_checkpoint_id"),
+        CheckConstraint("status IN ('complete', 'incomplete')", name="ck_kalshi_coverage_checkpoint_status"),
+        CheckConstraint("length(btrim(reason)) > 0", name="ck_kalshi_coverage_checkpoint_reason"),
+        CheckConstraint("retry_allowed = false", name="ck_kalshi_coverage_checkpoint_no_retry"),
+        CheckConstraint(
+            "current_orders_pages > 0 AND current_fills_pages > 0 "
+            "AND historical_orders_pages > 0 AND historical_fills_pages > 0",
+            name="ck_kalshi_coverage_checkpoint_pages",
+        ),
+        CheckConstraint(
+            "current_orders_unique >= 0 AND current_fills_unique >= 0 "
+            "AND historical_orders_unique >= 0 AND historical_fills_unique >= 0 "
+            "AND orders_unique >= 0 AND fills_unique >= 0",
+            name="ck_kalshi_coverage_checkpoint_counts",
+        ),
+        CheckConstraint(
+            "observed_evidence_hash ~ '^[0-9a-f]{64}$'",
+            name="ck_kalshi_coverage_checkpoint_hash",
+        ),
+        Index("idx_kalshi_coverage_checkpoints_observed", "observed_at"),
+        Index("idx_kalshi_coverage_checkpoints_status", "status", "observed_at"),
+    )
+
+
 def _register_immutable_ledger_table(table) -> None:  # noqa: ANN001
     _sa_event.listen(
         table,
@@ -3295,6 +3425,10 @@ def _register_execution_event_validation(table) -> None:
 _register_immutable_ledger_table(VenueOrderIntentRecord.__table__)
 _register_immutable_ledger_table(VenueExecutionEvent.__table__)
 _register_immutable_ledger_table(VenueProviderAcknowledgementRecord.__table__)
+_register_immutable_ledger_table(KalshiPortfolioOrderIdentity.__table__)
+_register_immutable_ledger_table(KalshiPortfolioOrderObservation.__table__)
+_register_immutable_ledger_table(KalshiPortfolioFillObservation.__table__)
+_register_immutable_ledger_table(KalshiPortfolioCoverageCheckpoint.__table__)
 _register_acknowledgement_validation(VenueProviderAcknowledgementRecord.__table__)
 _register_execution_event_validation(VenueExecutionEvent.__table__)
 
