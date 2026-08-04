@@ -7,8 +7,11 @@ from sqlalchemy import (
     Text,
     JSON,
     ForeignKey,
+    ForeignKeyConstraint,
     Enum as SQLEnum,
     Index,
+    CheckConstraint,
+    Numeric,
     UniqueConstraint,
     event as _sa_event,
     text,
@@ -3050,6 +3053,250 @@ class LiveTradingPosition(Base):
         UniqueConstraint("wallet_address", "token_id", name="uq_live_trading_positions_wallet_token"),
         Index("idx_live_trading_positions_wallet_market", "wallet_address", "market_id"),
     )
+
+
+# ==================== VENUE-NEUTRAL EXECUTION LEDGER ====================
+
+
+class VenueOrderIntentRecord(Base):
+    """Immutable order instructions persisted before any venue transmission."""
+
+    __tablename__ = "venue_order_intents"
+
+    id = Column(String, primary_key=True)
+    venue = Column(String, nullable=False)
+    client_order_id = Column(String, nullable=False)
+    instrument_id = Column(String, nullable=False)
+    book_side = Column(String, nullable=False)
+    quantity = Column(Numeric(38, 18, asdecimal=True), nullable=False)
+    limit_price = Column(Numeric(38, 18, asdecimal=True), nullable=False)
+    time_in_force = Column(String, nullable=False)
+    post_only = Column(Boolean, nullable=False, default=False, server_default="false")
+    source = Column(String, nullable=False)
+    source_id = Column(String, nullable=True)
+    decision_id = Column(String, nullable=True)
+    strategy_key = Column(String, nullable=True)
+    strategy_version = Column(Integer, nullable=True)
+    trace_id = Column(String, nullable=True)
+    created_at = Column(DateTime, default=_utcnow, nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint("venue", "client_order_id", name="uq_venue_order_intents_client"),
+        UniqueConstraint(
+            "id",
+            "venue",
+            "client_order_id",
+            name="uq_venue_order_intents_identity",
+        ),
+        UniqueConstraint("id", "venue", name="uq_venue_order_intents_venue_identity"),
+        CheckConstraint("venue IN ('kalshi', 'polymarket')", name="ck_venue_order_intents_venue"),
+        CheckConstraint("book_side IN ('bid', 'ask')", name="ck_venue_order_intents_side"),
+        CheckConstraint(
+            "quantity <> 'NaN'::numeric AND quantity > 0",
+            name="ck_venue_order_intents_quantity",
+        ),
+        CheckConstraint(
+            "limit_price > 0 AND limit_price < 1",
+            name="ck_venue_order_intents_price",
+        ),
+        CheckConstraint(
+            "time_in_force IN ('good_till_canceled', 'immediate_or_cancel', 'fill_or_kill')",
+            name="ck_venue_order_intents_tif",
+        ),
+        CheckConstraint("length(btrim(source)) > 0", name="ck_venue_order_intents_source"),
+        Index("idx_venue_order_intents_created", "created_at"),
+    )
+
+
+class VenueExecutionEvent(Base):
+    """Immutable, ordered evidence for an order intent's execution lifecycle."""
+
+    __tablename__ = "venue_execution_events"
+
+    id = Column(String, primary_key=True)
+    intent_id = Column(String, nullable=False)
+    venue = Column(String, nullable=False)
+    sequence = Column(Integer, nullable=False)
+    event_type = Column(String, nullable=False)
+    source = Column(String, nullable=False)
+    dedupe_key = Column(String, nullable=False)
+    provider_order_id = Column(String, nullable=True)
+    provider_event_id = Column(String, nullable=True)
+    occurred_at = Column(DateTime, nullable=False)
+    payload_json = Column(JSON, nullable=False, default=dict)
+    created_at = Column(DateTime, default=_utcnow, nullable=False)
+
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["intent_id", "venue"],
+            ["venue_order_intents.id", "venue_order_intents.venue"],
+            name="fk_venue_execution_events_intent_venue",
+        ),
+        UniqueConstraint("intent_id", "sequence", name="uq_venue_execution_events_sequence"),
+        UniqueConstraint("intent_id", "dedupe_key", name="uq_venue_execution_events_dedupe"),
+        UniqueConstraint("venue", "provider_event_id", name="uq_venue_execution_events_provider_event"),
+        CheckConstraint("sequence > 0", name="ck_venue_execution_events_sequence"),
+        CheckConstraint("length(btrim(event_type)) > 0", name="ck_venue_execution_events_type"),
+        CheckConstraint("length(btrim(source)) > 0", name="ck_venue_execution_events_source"),
+        CheckConstraint("length(btrim(dedupe_key)) > 0", name="ck_venue_execution_events_dedupe"),
+        CheckConstraint(
+            "provider_event_id IS NULL OR provider_order_id IS NOT NULL",
+            name="ck_venue_execution_events_provider_identity",
+        ),
+        Index("idx_venue_execution_events_intent_created", "intent_id", "created_at"),
+        Index("idx_venue_execution_events_provider", "provider_order_id"),
+    )
+
+
+class VenueProviderAcknowledgementRecord(Base):
+    """Immutable initial provider acknowledgement; later observations are events."""
+
+    __tablename__ = "venue_provider_acknowledgements"
+
+    intent_id = Column(String, primary_key=True)
+    venue = Column(String, nullable=False)
+    client_order_id = Column(String, nullable=False)
+    provider_order_id = Column(String, nullable=False)
+    provider_status = Column(String, nullable=False)
+    filled_quantity = Column(Numeric(38, 18, asdecimal=True), nullable=False)
+    remaining_quantity = Column(Numeric(38, 18, asdecimal=True), nullable=False)
+    provider_timestamp = Column(DateTime, nullable=False)
+    payload_json = Column(JSON, nullable=False, default=dict)
+    created_at = Column(DateTime, default=_utcnow, nullable=False)
+
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["intent_id", "venue", "client_order_id"],
+            [
+                "venue_order_intents.id",
+                "venue_order_intents.venue",
+                "venue_order_intents.client_order_id",
+            ],
+            name="fk_venue_provider_ack_intent_identity",
+        ),
+        UniqueConstraint("venue", "provider_order_id", name="uq_venue_provider_ack_provider"),
+        CheckConstraint("filled_quantity >= 0", name="ck_venue_provider_ack_filled"),
+        CheckConstraint("remaining_quantity >= 0", name="ck_venue_provider_ack_remaining"),
+        CheckConstraint("length(btrim(client_order_id)) > 0", name="ck_venue_provider_ack_client"),
+        CheckConstraint("length(btrim(provider_order_id)) > 0", name="ck_venue_provider_ack_provider"),
+        CheckConstraint("length(btrim(provider_status)) > 0", name="ck_venue_provider_ack_status"),
+        Index("idx_venue_provider_ack_created", "created_at"),
+    )
+
+
+def _register_immutable_ledger_table(table) -> None:  # noqa: ANN001
+    _sa_event.listen(
+        table,
+        "after_create",
+        DDL(
+            """
+            CREATE OR REPLACE FUNCTION reject_venue_execution_ledger_mutation()
+            RETURNS trigger AS $$
+            BEGIN
+                RAISE EXCEPTION 'venue execution ledger rows are immutable';
+            END;
+            $$ LANGUAGE plpgsql
+            """
+        ),
+    )
+    _sa_event.listen(
+        table,
+        "after_create",
+        DDL(
+            f"CREATE TRIGGER trg_{table.name}_immutable "
+            f"BEFORE UPDATE OR DELETE ON {table.name} "
+            "FOR EACH ROW EXECUTE FUNCTION reject_venue_execution_ledger_mutation()"
+        ),
+    )
+    _sa_event.listen(
+        table,
+        "after_create",
+        DDL(
+            f"CREATE TRIGGER trg_{table.name}_truncate_immutable "
+            f"BEFORE TRUNCATE ON {table.name} "
+            "FOR EACH STATEMENT EXECUTE FUNCTION reject_venue_execution_ledger_mutation()"
+        ),
+    )
+
+
+def _register_acknowledgement_validation(table) -> None:  # noqa: ANN001
+    _sa_event.listen(
+        table,
+        "after_create",
+        DDL(
+            """
+            CREATE OR REPLACE FUNCTION validate_venue_provider_acknowledgement()
+            RETURNS trigger AS $$
+            DECLARE intended_quantity numeric;
+            BEGIN
+                SELECT quantity INTO intended_quantity
+                FROM venue_order_intents
+                WHERE id = NEW.intent_id
+                  AND venue = NEW.venue
+                  AND client_order_id = NEW.client_order_id;
+                IF NOT FOUND THEN
+                    RAISE EXCEPTION 'acknowledgement identity does not match order intent';
+                END IF;
+                IF NEW.filled_quantity + NEW.remaining_quantity <> intended_quantity THEN
+                    RAISE EXCEPTION 'acknowledgement quantity does not match order intent';
+                END IF;
+                RETURN NEW;
+            END;
+            $$ LANGUAGE plpgsql
+            """
+        ),
+    )
+    _sa_event.listen(
+        table,
+        "after_create",
+        DDL(
+            "CREATE TRIGGER trg_venue_provider_ack_validate "
+            "BEFORE INSERT ON venue_provider_acknowledgements "
+            "FOR EACH ROW EXECUTE FUNCTION validate_venue_provider_acknowledgement()"
+        ),
+    )
+
+
+def _register_execution_event_validation(table) -> None:
+    _sa_event.listen(
+        table,
+        "after_create",
+        DDL(
+            """
+            CREATE OR REPLACE FUNCTION validate_venue_execution_event_provider_identity()
+            RETURNS trigger AS $$
+            BEGIN
+                IF NEW.provider_order_id IS NOT NULL AND NOT EXISTS (
+                    SELECT 1
+                    FROM venue_provider_acknowledgements
+                    WHERE intent_id = NEW.intent_id
+                      AND venue = NEW.venue
+                      AND provider_order_id = NEW.provider_order_id
+                ) THEN
+                    RAISE EXCEPTION 'execution event provider order identity does not match acknowledgement';
+                END IF;
+                RETURN NEW;
+            END;
+            $$ LANGUAGE plpgsql
+            """
+        ),
+    )
+    _sa_event.listen(
+        table,
+        "after_create",
+        DDL(
+            "CREATE TRIGGER trg_venue_execution_event_provider_validate "
+            "BEFORE INSERT ON venue_execution_events "
+            "FOR EACH ROW EXECUTE FUNCTION validate_venue_execution_event_provider_identity()"
+        ),
+    )
+
+
+_register_immutable_ledger_table(VenueOrderIntentRecord.__table__)
+_register_immutable_ledger_table(VenueExecutionEvent.__table__)
+_register_immutable_ledger_table(VenueProviderAcknowledgementRecord.__table__)
+_register_acknowledgement_validation(VenueProviderAcknowledgementRecord.__table__)
+_register_execution_event_validation(VenueExecutionEvent.__table__)
 
 
 # ==================== SHARED STATE (DB AS SINGLE SOURCE OF TRUTH) ====================
