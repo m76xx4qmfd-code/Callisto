@@ -66,7 +66,7 @@ onnxruntime>=1.24.0
 xgboost-cpu>=3.2.0
 lightgbm>=4.6.0
 sentence-transformers>=2.2.0
-faiss-cpu>=1.7.0
+faiss-cpu>=1.7.0; sys_platform != "darwin"
 
 # Shadow simulator: Cox proportional hazards fill model
 # (services/fill_simulator/cox_trainer.py).  Provides CoxPHFitter,

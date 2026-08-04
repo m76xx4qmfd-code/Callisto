@@ -1,4 +1,4 @@
-﻿# Homerun - Windows Run Script (TUI)
+﻿# Callisto - Windows Run Script (TUI)
 # Run: .\scripts\infra\run.ps1
 
 $ErrorActionPreference = "Stop"
@@ -1484,7 +1484,7 @@ function Cleanup-StaleHomerunProcesses {
     }
 
     if ($killed -gt 0) {
-        Write-Host "Cleaned up $killed stale Homerun process(es) from a previous run." -ForegroundColor Yellow
+        Write-Host "Cleaned up $killed stale Callisto process(es) from a previous run." -ForegroundColor Yellow
         Start-Sleep -Seconds 1
     }
 }
@@ -1691,7 +1691,7 @@ function Start-HomerunGuiProcess {
     if ($env:HOMERUN_GUI_LAUNCHER -eq "bat") {
         Start-Sleep -Seconds 3
         if ($guiProcess.HasExited) {
-            Write-Host "Homerun GUI exited during startup." -ForegroundColor Red
+            Write-Host "Callisto GUI exited during startup." -ForegroundColor Red
             if (Test-Path $guiStdoutPath) {
                 $stdoutTail = Get-Content -Path $guiStdoutPath -Tail 20 -ErrorAction SilentlyContinue
                 if ($stdoutTail) {

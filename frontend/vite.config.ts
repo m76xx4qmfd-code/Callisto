@@ -17,7 +17,7 @@ logger.error = (msg, options) => {
   loggerError(msg, options)
 }
 
-const vitePort = Number(process.env.VITE_PORT || 3000)
+const vitePort = Number(process.env.VITE_PORT || 5173)
 const viteStrictPort = String(process.env.VITE_STRICT_PORT || "").toLowerCase() === "true"
 const viteHost = process.env.VITE_HOST || undefined
 

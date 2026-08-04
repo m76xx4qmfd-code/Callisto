@@ -343,6 +343,12 @@ show_step "Installing Python dependencies"
 
 PIP_USER=0 python -m pip install -q --no-user --upgrade pip
 PIP_USER=0 python -m pip install -q --no-user -r requirements.txt
+if [ "$(uname -s)" = "Darwin" ]; then
+    # Existing venvs retain packages that become excluded by environment
+    # markers. Remove FAISS's vendored libomp so it cannot conflict with
+    # PyTorch's separate runtime and abort the Python process.
+    PIP_USER=0 python -m pip uninstall -q -y faiss-cpu >/dev/null 2>&1 || true
+fi
 if ! python -c "import socksio" >/dev/null 2>&1; then
     show_step_fail "socksio missing"
     show_sub_info "Run: python -m pip install --no-user \"httpx[socks]>=0.27.0,<1.0\""
@@ -471,7 +477,7 @@ echo -e "${DIM}      Backend:  cd backend && source venv/bin/activate && uvicorn
 echo -e "${DIM}      Frontend: cd frontend && npm run dev${NC}"
 echo ""
 echo -e "${WHITE}    Endpoints:${NC}"
-echo -e "${CYAN}      Frontend  http://localhost:3000${NC}"
+echo -e "${CYAN}      Frontend  http://localhost:5173${NC}"
 echo -e "${CYAN}      Backend   http://localhost:8000${NC}"
 echo -e "${CYAN}      API Docs  http://localhost:8000/docs${NC}"
 echo ""

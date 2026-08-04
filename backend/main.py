@@ -1,7 +1,6 @@
 import os
 import asyncio
 import signal
-import threading
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from datetime import datetime
@@ -430,7 +429,7 @@ async def lifespan(app: FastAPI):
 
             async with AsyncSessionLocal() as session:
                 seeded = await ensure_all_strategies_seeded(session)
-                loaded = await _loader.refresh_all_from_db(session=session)
+            loaded = await _loader.refresh_all_from_db()
             logger.info(
                 "Strategy registries loaded",
                 seeded=seeded.get("seeded", 0),
@@ -447,7 +446,7 @@ async def lifespan(app: FastAPI):
 
             async with AsyncSessionLocal() as session:
                 seeded = await ensure_all_data_sources_seeded(session)
-                loaded = await data_source_loader.refresh_all_from_db(session=session)
+            loaded = await data_source_loader.refresh_all_from_db()
             logger.info(
                 "Data source registries loaded",
                 seeded=seeded.get("seeded", 0),
@@ -842,12 +841,10 @@ async def lifespan(app: FastAPI):
         wallet_task = asyncio.create_task(wallet_tracker.start_monitoring(30))
         tasks.append(wallet_task)
 
-        # Initialize live execution service if credentials are configured
-        trading_initialized = await live_execution_service.initialize()
-        if trading_initialized:
-            logger.info("Live execution service initialized")
-        else:
-            logger.info("Live execution service not initialized - credentials not configured")
+        # Callisto API startup is read-only with respect to every venue.
+        # Execution remains disconnected until the Kalshi-native lifecycle and
+        # an explicit current-session arming boundary are implemented.
+        logger.info("Venue execution disabled for API startup")
 
         # Start background cleanup if enabled (DB settings override env defaults).
         cleanup_enabled = bool(settings.AUTO_CLEANUP_ENABLED)
@@ -928,57 +925,18 @@ async def lifespan(app: FastAPI):
                 interval_minutes=int(settings.MAINTENANCE_HIGH_VOLUME_RETENTION_MINUTES),
             )
 
-        # Initialize news intelligence layer (workers own background loops)
+        # Load cached news for API search. Embedding/model initialization is
+        # worker-owned and must never delay or crash HTTP API startup.
         try:
             from services.news.feed_service import news_feed_service
-            from services.news.semantic_matcher import semantic_matcher
 
-            # Load previously-cached articles from DB so they're available
-            # immediately for matching and search.
             await news_feed_service.load_from_db()
-
-            matcher_ready = False
-            try:
-                # Use a daemon thread so that a slow ML model load (e.g. first
-                # import of torch on a cold CI machine) never blocks
-                # asyncio.run()'s shutdown_default_executor() call — non-daemon
-                # threads submitted via asyncio.to_thread() are waited for at
-                # exit and can exceed the lifespan smoke-test's 45 s budget.
-                _matcher_event = asyncio.Event()
-                _matcher_result: list = [False]
-                _matcher_loop = asyncio.get_running_loop()
-
-                def _init_matcher_thread() -> None:
-                    try:
-                        _matcher_result[0] = semantic_matcher.initialize()
-                    except Exception:
-                        pass
-                    finally:
-                        try:
-                            _matcher_loop.call_soon_threadsafe(_matcher_event.set)
-                        except RuntimeError:
-                            pass  # loop already closed during shutdown
-
-                threading.Thread(
-                    target=_init_matcher_thread,
-                    daemon=True,
-                    name="semantic-matcher-init",
-                ).start()
-                await asyncio.wait_for(_matcher_event.wait(), timeout=5.0)
-                matcher_ready = _matcher_result[0]
-            except asyncio.TimeoutError:
-                logger.warning(
-                    "Semantic matcher initialization timed out; continuing in deferred mode",
-                    timeout_seconds=5.0,
-                )
             logger.info(
-                "News intelligence layer initialized (worker-owned execution)",
-                ml_mode=bool(semantic_matcher.is_ml_mode and matcher_ready),
-                deferred_init=not matcher_ready,
+                "News cache loaded (semantic matching is worker-owned)",
                 cached_articles=news_feed_service.article_count,
             )
         except Exception as e:
-            logger.warning(f"News intelligence init failed (non-critical): {e}")
+            logger.warning(f"News cache init failed (non-critical): {e}")
 
         # Notifier and opportunity_recorder run in scanner worker (callbacks on scan)
 
@@ -1070,8 +1028,8 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(
-    title="Homerun",
-    description="Polymarket arbitrage detection, paper trading, and autonomous trading",
+    title="Callisto",
+    description="Kalshi-first prediction-market research, strategy development, and paper trading",
     version="2.0.0",
     lifespan=lifespan,
 )
@@ -1353,19 +1311,20 @@ async def readiness_check():
         "scanner": scanner_status.get("running", False),
         "database": True,
         "ws_feeds": bool(_get_ws_feeds_status(scanner_status).get("healthy", False)) if settings.WS_FEED_ENABLED else True,
-        "polymarket_api": True,
         # Redis is a soft dependency: not gated as required for readiness,
         # but surfaced so the GUI / monitoring can observe degradation.
         "redis": redis_ok,
     }
 
-    all_ready = all(
-        checks[k] for k in ("scanner", "database", "ws_feeds", "polymarket_api")
-    )
+    # This probe describes the API process. Scanner, feeds, and Redis are
+    # separately deployed optional capabilities and must not make an otherwise
+    # healthy HTTP API unready.
+    all_ready = all(checks[k] for k in ("database",))
 
     return {
         "status": "ready" if all_ready else "not_ready",
         "checks": checks,
+        "execution": "disabled",
         "redis": redis_snapshot,
         "wallet_state_bus": wallet_state_snapshot,
         "trader_events_bridge": trader_events_snapshot,

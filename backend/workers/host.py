@@ -26,7 +26,6 @@ from models.model_registry import register_all_models
 from services.event_bus import event_bus
 from services.event_dispatcher import event_dispatcher
 from services.intent_runtime import get_intent_runtime
-from services.live_execution_service import live_execution_service
 from services.market_cache import market_cache_service
 from services.market_runtime import get_market_runtime
 from services.position_monitor import position_monitor
@@ -144,7 +143,7 @@ _PLANE_CONFIGS: dict[str, dict[str, Any]] = {
         "start_market_runtime": True,
         "load_market_cache": True,
         "load_news_feed": False,
-        "initialize_live_execution": True,
+        "initialize_live_execution": False,
         "start_copy_trade_service": True,
         "start_position_monitor": True,
         "start_fill_monitor": True,
@@ -320,7 +319,7 @@ _PLANE_CONFIGS: dict[str, dict[str, Any]] = {
         "start_market_runtime": True,
         "load_market_cache": True,
         "load_news_feed": True,
-        "initialize_live_execution": True,
+        "initialize_live_execution": False,
         "start_copy_trade_service": True,
         "start_position_monitor": True,
         "start_fill_monitor": True,
@@ -398,13 +397,10 @@ _PLANE_CONFIGS: dict[str, dict[str, Any]] = {
         # "reconciliation" -> place_exits=False): the heavy per-candidate sweep +
         # settlement / terminal-audit / bulk-reconcile bookkeeping runs here on
         # its OWN process so the trading event loop is never loaded by it.  It
-        # NEVER places/cancels live orders — live_execution is initialized in
-        # READ-ONLY mode (initialize_live_execution=True + live_execution_read_only
-        # =True): it loads CLOB creds so authenticated READS (order snapshots,
-        # wallet/balance) succeed, but every venue mutation (place/cancel/allowance)
-        # is hard-blocked at the service. Combined with the reconcile place_exits
-        # gate + dual-writer scoping, the cold plane reads + bookkeeps but mutates
-        # nothing and never persists the pending-exit execution lifecycle. The
+        # Venue execution is deliberately unavailable in Callisto's worker
+        # host until the Kalshi-native lifecycle and current-session arming
+        # boundary are implemented. This plane performs database bookkeeping
+        # only and does not load venue credentials.
         # trading plane keeps exit_risk_loop (primary, real-time exits) + a
         # place_exits=True reconcile backstop at a longer cadence. Strategies are
         # loaded so the cold pass computes the same exit decisions (telemetry);
@@ -424,10 +420,8 @@ _PLANE_CONFIGS: dict[str, dict[str, Any]] = {
         "start_market_runtime": False,
         "load_market_cache": True,
         "load_news_feed": False,
-        # Init live_execution but READ-ONLY: creds for authenticated reads;
-        # every venue mutation (place/cancel/allowance) hard-blocked.
-        "initialize_live_execution": True,
-        "live_execution_read_only": True,
+        # Venue execution and credential loading are disabled.
+        "initialize_live_execution": False,
         "start_copy_trade_service": False,
         "start_position_monitor": False,
         "start_fill_monitor": False,
@@ -1073,47 +1067,6 @@ class WorkerHost:
                 exc_info=exc,
             )
 
-    async def _initialize_live_execution_background(self) -> None:
-        # Retry until ready.  A single attempt is not enough: a transient at
-        # startup (DB pool contention, a slow credential/funder/CLOB round-trip)
-        # leaves live_execution not-ready, and the orchestrator's live cycle
-        # then defers every cycle (run_worker_loop's is_ready() gate) — so
-        # without retrying here an arming user would wait forever.  Exponential
-        # backoff keeps a genuinely unconfigured account (no credentials) from
-        # spinning, while still self-healing a transient and picking up
-        # credentials configured at runtime.
-        backoff = 2.0
-        max_backoff = 30.0
-        # Read-only planes (cold reconciliation) load creds for authenticated
-        # READS but must never mutate the venue. Set this BEFORE any init so the
-        # service comes up with all mutations hard-blocked.
-        live_execution_service.set_read_only(self._enabled("live_execution_read_only"))
-        while not self._shutting_down:
-            try:
-                if live_execution_service.is_ready():
-                    return
-                trading_initialized = await live_execution_service.initialize()
-                if trading_initialized:
-                    logger.info("Live execution service initialized", plane=self._plane_name)
-                    return
-                logger.info(
-                    "Live execution service not initialized (credentials not configured); will retry",
-                    plane=self._plane_name,
-                    last_error=live_execution_service.get_last_init_error(),
-                )
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:
-                logger.warning(
-                    "Live execution initialization failed; will retry",
-                    plane=self._plane_name,
-                    exc_info=exc,
-                )
-            try:
-                await asyncio.sleep(backoff)
-            except asyncio.CancelledError:
-                raise
-            backoff = min(backoff * 2.0, max_backoff)
 
     async def _acquire_plane_lock(self) -> None:
         self._plane_lock.acquire()
@@ -1735,13 +1688,6 @@ class WorkerHost:
                 failure_message="News feed preload failed",
             )
 
-        if self._enabled("initialize_live_execution"):
-            self._background_tasks.append(
-                asyncio.create_task(
-                    self._initialize_live_execution_background(),
-                    name=f"{self._plane_name}-live-execution-init",
-                )
-            )
 
         if self._enabled("start_copy_trade_service"):
             async def _start_copy_trade_service() -> None:

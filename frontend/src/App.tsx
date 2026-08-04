@@ -1865,7 +1865,7 @@ function App() {
             <div className="w-7 h-7 bg-green-500/15 rounded-lg flex items-center justify-center border border-green-500/20">
               <Terminal className="w-4 h-4 text-green-400" />
             </div>
-            <span className="text-sm font-bold text-green-400 tracking-wider font-data">HOMERUN</span>
+            <span className="text-sm font-bold text-green-400 tracking-wider font-data">CALLISTO</span>
           </div>
 
           <AccountModeSelector />
