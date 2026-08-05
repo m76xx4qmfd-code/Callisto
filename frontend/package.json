@@ -7,7 +7,7 @@
     "dev": "vite",
     "build": "tsc && vite build",
     "test:kalshi-portfolio-component": "vite-node scripts/test-kalshi-portfolio-component.tsx",
-    "test:kalshi-portfolio-wire": "node --experimental-strip-types scripts/test-kalshi-portfolio-wire.mjs",
+    "test:kalshi-portfolio-wire": "vite-node scripts/test-kalshi-portfolio-wire.mjs",
     "preview": "vite preview"
   },
   "dependencies": {
