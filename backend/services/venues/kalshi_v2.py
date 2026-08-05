@@ -857,6 +857,20 @@ def event_order_from_intent(
     )
 
 
+def kalshi_principal_fingerprint(*, origin: str, key_id: str) -> str:
+    """Return the non-secret authenticated-principal identity shared by REST and WebSocket runtimes."""
+
+    normalized_origin = origin.strip().rstrip("/")
+    if normalized_origin not in _KALSHI_APPROVED_ORIGINS:
+        raise KalshiProtocolError("principal fingerprint requires an approved Kalshi origin")
+    normalized_key_id = key_id.strip()
+    if not normalized_key_id:
+        raise KalshiProtocolError("Kalshi key_id is required")
+    origin_bytes = normalized_origin.encode()
+    material = str(len(origin_bytes)).encode() + b":" + origin_bytes + normalized_key_id.encode()
+    return hashlib.sha256(material).hexdigest()
+
+
 class KalshiRequestSigner:
     """RSA-PSS/SHA-256 signer for current Kalshi authenticated requests."""
 
@@ -897,6 +911,9 @@ class KalshiRequestSigner:
             "KALSHI-ACCESS-SIGNATURE": base64.b64encode(signature).decode("ascii"),
         }
 
+    def principal_fingerprint(self, *, origin: str) -> str:
+        return kalshi_principal_fingerprint(origin=origin, key_id=self.key_id)
+
 
 class KalshiV2Client:
     """Authenticated V2 portfolio reads and event orders with fail-closed writes.
@@ -924,9 +941,7 @@ class KalshiV2Client:
             raise KalshiProtocolError("credentials may only be sent to an approved Kalshi origin")
         self._origin = origin
         self._signer = KalshiRequestSigner(key_id=key_id, private_key_pem=private_key_pem)
-        origin_bytes = origin.encode()
-        fingerprint_material = str(len(origin_bytes)).encode() + b":" + origin_bytes + self._signer.key_id.encode()
-        self._principal_fingerprint = hashlib.sha256(fingerprint_material).hexdigest()
+        self._principal_fingerprint = self._signer.principal_fingerprint(origin=origin)
         self._http = http_client or httpx.AsyncClient(timeout=30.0)
         self._owns_http = http_client is None
         self._allow_writes = allow_writes
