@@ -19,6 +19,15 @@ from tests.postgres_test_db import build_postgres_session_factory
 from utils.utcnow import utcnow
 
 
+@pytest.fixture(autouse=True)
+def _allow_isolated_legacy_service_unit_tests(monkeypatch):
+    monkeypatch.setattr(
+        LiveExecutionService,
+        "is_ready",
+        lambda self: self._initialized and self._client is not None,
+    )
+
+
 async def _build_session_factory():
     return await build_postgres_session_factory(Base, "live_execution_runtime_state")
 
