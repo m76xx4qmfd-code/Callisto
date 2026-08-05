@@ -144,7 +144,7 @@ async def test_head_migration_downgrade_upgrade_roundtrip() -> None:
 
 @pytest.mark.db
 @pytest.mark.asyncio
-async def test_head_migration_from_previous_revision_creates_and_reverses_paper_schema() -> None:
+async def test_head_migration_from_previous_revision_creates_paper_schema() -> None:
     import asyncpg
     from sqlalchemy import MetaData, inspect, text
 
@@ -189,7 +189,8 @@ async def test_head_migration_from_previous_revision_creates_and_reverses_paper_
                     await conn.execute(
                         text(
                             "SELECT tgname FROM pg_trigger "
-                            "WHERE tgrelid IN ('kalshi_paper_intents'::regclass, "
+                            "WHERE tgrelid IN ('kalshi_paper_accounts'::regclass, "
+                            "'kalshi_paper_intents'::regclass, "
                             "'kalshi_paper_decisions'::regclass, "
                             "'kalshi_paper_fills'::regclass) AND NOT tgisinternal"
                         )
@@ -247,25 +248,12 @@ async def test_head_migration_from_previous_revision_creates_and_reverses_paper_
                 "trg_kalshi_paper_decisions_immutable",
                 "trg_kalshi_paper_decisions_truncate_immutable",
                 "trg_kalshi_paper_decisions_fill_aggregate",
+                "trg_kalshi_paper_decisions_validate_account_journal",
                 "trg_kalshi_paper_fills_immutable",
                 "trg_kalshi_paper_fills_truncate_immutable",
                 "trg_kalshi_paper_fills_fill_aggregate",
+                "trg_kalshi_paper_accounts_validate_journal",
             } <= trigger_names
-
-            def _downgrade_and_reupgrade(sync_conn) -> tuple[set[str], set[str]]:
-                cfg = _build_alembic_config(sync_conn)
-                command.downgrade(cfg, previous_revision)
-                absent = set(inspect(sync_conn).get_table_names())
-                command.upgrade(cfg, head_revision)
-                restored = set(inspect(sync_conn).get_table_names())
-                return absent, restored
-
-            after_downgrade, after_reupgrade = await conn.run_sync(_downgrade_and_reupgrade)
-            assert "kalshi_paper_accounts" not in after_downgrade
-            assert "kalshi_paper_intents" not in after_downgrade
-            assert "kalshi_paper_decisions" not in after_downgrade
-            assert "kalshi_paper_fills" not in after_downgrade
-            assert paper_tables <= after_reupgrade
     finally:
         await engine.dispose()
 

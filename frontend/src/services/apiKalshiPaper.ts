@@ -263,6 +263,11 @@ export function requireKalshiPaperDecisionInput(value: unknown): KalshiPaperDeci
   } else if (input.quantity !== undefined || input.limit_price !== undefined) {
     throw new Error('Pass pending attempt cannot include quantity or limit_price')
   }
+  const allowedKeys = action === 'execute'
+    ? new Set(['account_id', 'decision_id', 'opportunity_id', 'opportunity_revision', 'action', 'quantity', 'limit_price'])
+    : new Set(['account_id', 'decision_id', 'opportunity_id', 'opportunity_revision', 'action'])
+  const unknownKey = Object.keys(input).find((key) => !allowedKeys.has(key))
+  if (unknownKey !== undefined) throw new Error(`Pending attempt contains unknown field ${unknownKey}`)
   return input as unknown as KalshiPaperDecisionInput
 }
 

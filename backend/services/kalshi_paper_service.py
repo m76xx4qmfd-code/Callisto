@@ -344,6 +344,7 @@ class KalshiPaperService:
                                 outcome=resolved.outcome,
                                 quantity=parsed_quantity,
                                 limit_price=parsed_limit,
+                                price_ranges=quote.market.price_ranges,
                             )
                             prepared = _PreparedDecision(
                                 quote=quote,

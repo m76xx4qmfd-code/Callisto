@@ -177,6 +177,13 @@ class PaperBookLevel:
 
 
 @dataclass(frozen=True)
+class PaperPriceRange:
+    start: Decimal
+    end: Decimal
+    step: Decimal
+
+
+@dataclass(frozen=True)
 class PaperBook:
     ticker: str
     yes_bids: tuple[PaperBookLevel, ...]
@@ -193,6 +200,8 @@ class PaperMarket:
     ticker: str
     event_ticker: str
     notional_value: Decimal
+    price_level_structure: str
+    price_ranges: tuple[PaperPriceRange, ...]
     fee: Decimal
     fee_rule_version: str
     fee_provenance: Mapping[str, str]
@@ -233,12 +242,48 @@ class PaperFillResult:
     formula_version: str = "kalshi-complementary-depth-ioc-v1"
 
 
+def _parse_price_ranges(value: object) -> tuple[PaperPriceRange, ...]:
+    if not isinstance(value, list) or not value:
+        raise KalshiPaperProtocolError("Kalshi market price_ranges must be a non-empty list")
+    parsed: list[PaperPriceRange] = []
+    previous_end: int | None = None
+    for index, raw_range in enumerate(value):
+        if not isinstance(raw_range, Mapping):
+            raise KalshiPaperProtocolError(f"Kalshi market price_ranges[{index}] must be an object")
+        start = _decimal_string(raw_range.get("start"), field=f"price_ranges[{index}].start", max_scale=_PRICE_SCALE)
+        end = _decimal_string(raw_range.get("end"), field=f"price_ranges[{index}].end", max_scale=_PRICE_SCALE)
+        step = _decimal_string(raw_range.get("step"), field=f"price_ranges[{index}].step", max_scale=_PRICE_SCALE)
+        start_units = _to_scaled_int(start, scale=_PRICE_SCALE, field=f"price_ranges[{index}].start")
+        end_units = _to_scaled_int(end, scale=_PRICE_SCALE, field=f"price_ranges[{index}].end")
+        step_units = _to_scaled_int(step, scale=_PRICE_SCALE, field=f"price_ranges[{index}].step")
+        if start_units < 0 or end_units > 10**_PRICE_SCALE or start_units >= end_units:
+            raise KalshiPaperProtocolError(f"Kalshi market price_ranges[{index}] has invalid bounds")
+        if step_units <= 0 or (end_units - start_units) % step_units:
+            raise KalshiPaperProtocolError(f"Kalshi market price_ranges[{index}] has an invalid step")
+        if previous_end is not None and start_units < previous_end:
+            raise KalshiPaperProtocolError("Kalshi market price_ranges overlap or are out of order")
+        parsed.append(PaperPriceRange(start=start, end=end, step=step))
+        previous_end = end_units
+    return tuple(parsed)
+
+
+def _price_is_on_tick(price_units: int, price_ranges: tuple[PaperPriceRange, ...]) -> bool:
+    for price_range in price_ranges:
+        start_units = _to_scaled_int(price_range.start, scale=_PRICE_SCALE, field="price range start")
+        end_units = _to_scaled_int(price_range.end, scale=_PRICE_SCALE, field="price range end")
+        step_units = _to_scaled_int(price_range.step, scale=_PRICE_SCALE, field="price range step")
+        if start_units <= price_units <= end_units and (price_units - start_units) % step_units == 0:
+            return True
+    return False
+
+
 def simulate_buy_ioc(
     *,
     book: PaperBook,
     outcome: Outcome,
     quantity: Decimal,
     limit_price: Decimal,
+    price_ranges: tuple[PaperPriceRange, ...],
 ) -> PaperFillResult:
     if outcome not in {"yes", "no"}:
         raise KalshiPaperProtocolError("outcome must be yes or no")
@@ -248,6 +293,8 @@ def simulate_buy_ioc(
     limit_units = _to_scaled_int(limit_price, scale=_PRICE_SCALE, field="limit_price")
     if limit_units <= 0 or limit_units >= 10**_PRICE_SCALE:
         raise KalshiPaperProtocolError("limit_price must be greater than 0 and less than 1")
+    if not _price_is_on_tick(limit_units, price_ranges):
+        raise KalshiPaperProtocolError("limit_price is not valid for the market price ranges")
 
     source_levels = book.no_bids if outcome == "yes" else book.yes_bids
     validated_levels: list[tuple[int, int]] = []
@@ -256,6 +303,8 @@ def simulate_buy_ioc(
         level_quantity_units = _to_scaled_int(level.quantity, scale=_QUANTITY_SCALE, field="book quantity")
         if source_price_units <= 0 or source_price_units >= 10**_PRICE_SCALE:
             raise KalshiPaperProtocolError("book price must be greater than 0 and less than 1")
+        if not _price_is_on_tick(source_price_units, price_ranges):
+            raise KalshiPaperProtocolError("book price is not valid for the market price ranges")
         if level_quantity_units <= 0:
             raise KalshiPaperProtocolError("book quantity must be greater than 0")
         validated_levels.append((source_price_units, level_quantity_units))
@@ -265,6 +314,8 @@ def simulate_buy_ioc(
     fills: list[PaperFill] = []
     for source_price_units, available_units in sorted(validated_levels, reverse=True):
         execution_price_units = 10**_PRICE_SCALE - source_price_units
+        if not _price_is_on_tick(execution_price_units, price_ranges):
+            raise KalshiPaperProtocolError("complementary execution price is not valid for the market price ranges")
         if execution_price_units > limit_units:
             continue
         fill_units = min(remaining_units, available_units)
@@ -395,12 +446,40 @@ class KalshiPaperMarketDataClient:
             book = self._parse_book(
                 ticker=normalized_ticker,
                 payload=orderbook_payload,
+                price_ranges=market.price_ranges,
                 observed_at=book_observed_at,
                 fetched_at=book_fetched_at,
             )
-        if market.fee_waiver_expiration <= book_fetched_at:
-            raise KalshiPaperProtocolError("Kalshi market fee waiver is not active at orderbook observation")
-        return PaperQuote(market=market, book=book)
+            refreshed_market_response = await self._get(
+                client,
+                f"{KALSHI_API_PREFIX}/markets/{encoded_ticker}",
+            )
+            refreshed_market_fetched_at = self._now().astimezone(timezone.utc)
+            refreshed_market_observed_at = _parse_source_date(
+                refreshed_market_response,
+                now=refreshed_market_fetched_at,
+            )
+            refreshed_market_payload = _required_mapping(
+                _load_json(refreshed_market_response, context="market"),
+                "market",
+                context="market",
+            )
+            refreshed_market = self._parse_market(
+                requested_ticker=normalized_ticker,
+                payload=refreshed_market_payload,
+                observed_at=refreshed_market_observed_at,
+                fetched_at=refreshed_market_fetched_at,
+            )
+        if (
+            refreshed_market.event_ticker != market.event_ticker
+            or refreshed_market.notional_value != market.notional_value
+            or refreshed_market.price_level_structure != market.price_level_structure
+            or refreshed_market.price_ranges != market.price_ranges
+        ):
+            raise KalshiPaperProtocolError("Kalshi market execution terms changed during quote collection")
+        if refreshed_market.fee_waiver_expiration <= refreshed_market_fetched_at:
+            raise KalshiPaperProtocolError("Kalshi market fee waiver is not active after orderbook observation")
+        return PaperQuote(market=refreshed_market, book=book)
 
     def _parse_market(
         self,
@@ -427,6 +506,8 @@ class KalshiPaperMarketDataClient:
         )
         if fee_waiver_expiration <= observed_at:
             raise KalshiPaperProtocolError("Kalshi market fee waiver is not active")
+        price_level_structure = _required_text(payload, "price_level_structure", context="market")
+        price_ranges = _parse_price_ranges(payload.get("price_ranges"))
 
         evidence = {
             "ticker": ticker,
@@ -437,7 +518,15 @@ class KalshiPaperMarketDataClient:
             "fee_waiver_expiration_time": fee_waiver_expiration.isoformat(),
             "close_time": _required_text(payload, "close_time", context="market"),
             "latest_expiration_time": _required_text(payload, "latest_expiration_time", context="market"),
-            "price_level_structure": _required_text(payload, "price_level_structure", context="market"),
+            "price_level_structure": price_level_structure,
+            "price_ranges": [
+                {
+                    "start": decimal_string(price_range.start, scale=_PRICE_SCALE),
+                    "end": decimal_string(price_range.end, scale=_PRICE_SCALE),
+                    "step": decimal_string(price_range.step, scale=_PRICE_SCALE),
+                }
+                for price_range in price_ranges
+            ],
         }
         evidence_json = _canonical_json(evidence)
         evidence_hash = _hash_json(evidence_json)
@@ -454,6 +543,8 @@ class KalshiPaperMarketDataClient:
             ticker=ticker,
             event_ticker=event_ticker,
             notional_value=notional_value,
+            price_level_structure=price_level_structure,
+            price_ranges=price_ranges,
             fee=Decimal("0"),
             fee_rule_version="kalshi-market-fee-waiver-v1",
             fee_provenance=fee_provenance,
@@ -469,6 +560,7 @@ class KalshiPaperMarketDataClient:
         *,
         ticker: str,
         payload: Mapping[str, object],
+        price_ranges: tuple[PaperPriceRange, ...],
         observed_at: datetime,
         fetched_at: datetime,
     ) -> PaperBook:
@@ -476,6 +568,10 @@ class KalshiPaperMarketDataClient:
         no_bids = self._parse_levels(payload.get("no_dollars"), side="no")
         if not yes_bids and not no_bids:
             raise KalshiPaperProtocolError("Kalshi orderbook displayed depth is empty")
+        for level in (*yes_bids, *no_bids):
+            price_units = _to_scaled_int(level.price, scale=_PRICE_SCALE, field="book price")
+            if not _price_is_on_tick(price_units, price_ranges):
+                raise KalshiPaperProtocolError("Kalshi orderbook contains an off-tick price")
         evidence = {
             "ticker": ticker,
             "yes_dollars": [

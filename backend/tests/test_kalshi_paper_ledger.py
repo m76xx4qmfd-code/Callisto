@@ -27,6 +27,7 @@ from services.kalshi_paper_execution import (
     PaperBook,
     PaperBookLevel,
     PaperMarket,
+    PaperPriceRange,
     PaperQuote,
 )
 from services.kalshi_paper_service import (
@@ -69,6 +70,8 @@ def _quote() -> PaperQuote:
             ticker="KXTEST-26",
             event_ticker="KXTEST",
             notional_value=Decimal("1.000000"),
+            price_level_structure="deci_cent",
+            price_ranges=(PaperPriceRange(start=Decimal("0"), end=Decimal("1"), step=Decimal("0.001")),),
             fee=Decimal("0"),
             fee_rule_version="kalshi-market-fee-waiver-v1",
             fee_provenance=MappingProxyType(
@@ -520,6 +523,43 @@ async def test_database_rejects_mutation_truncation_and_excess_scale() -> None:
                 with pytest.raises(DBAPIError):
                     await session.execute(text(statement))
                     await session.commit()
+
+        async with factory() as session:
+            await session.execute(
+                text(
+                    "UPDATE kalshi_paper_accounts SET cash_balance = cash_balance + 1 "
+                    "WHERE id = :account_id"
+                ),
+                {"account_id": account["id"]},
+            )
+            with pytest.raises(DBAPIError, match="cash does not match immutable journal"):
+                await session.commit()
+
+        async with factory() as session:
+            await session.execute(
+                text(
+                    "INSERT INTO kalshi_paper_intents "
+                    "SELECT account_id, 'forged-journal', request_hash, action, opportunity_id, "
+                    "opportunity_stable_id, opportunity_revision, opportunity_snapshot_json, strategy_key, "
+                    "strategy_version, ticker, outcome, requested_quantity, limit_price, created_at "
+                    "FROM kalshi_paper_intents WHERE decision_id = 'guarded'"
+                )
+            )
+            await session.execute(
+                text(
+                    "INSERT INTO kalshi_paper_decisions "
+                    "SELECT account_id, 'forged-journal', 2, request_hash, action, opportunity_id, "
+                    "opportunity_stable_id, opportunity_revision, opportunity_snapshot_json, strategy_key, "
+                    "strategy_version, ticker, event_ticker, outcome, order_side, time_in_force, "
+                    "requested_quantity, limit_price, 'rejected', 'forged', source_origin, market_observed_at, "
+                    "market_fetched_at, market_evidence_hash, market_evidence_json, book_observed_at, "
+                    "book_fetched_at, book_evidence_hash, book_evidence_json, fill_formula_version, "
+                    "fee_rule_version, fee_provenance_json, 0, requested_quantity, NULL, 0, 0, 999, 999, created_at "
+                    "FROM kalshi_paper_decisions WHERE decision_id = 'guarded'"
+                )
+            )
+            with pytest.raises(DBAPIError, match="journal sequence is not contiguous"):
+                await session.commit()
 
         async with factory() as session:
             await session.execute(

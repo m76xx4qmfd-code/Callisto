@@ -10,7 +10,7 @@ from __future__ import annotations
 import sqlalchemy as sa
 from alembic import op
 
-from alembic_helpers import safe_create_index, safe_create_table, table_names
+from alembic_helpers import safe_create_index, safe_create_table
 
 revision = "202608050002"
 down_revision = "202608050001"
@@ -443,34 +443,88 @@ def upgrade() -> None:
         "FOR EACH ROW EXECUTE FUNCTION validate_kalshi_paper_fill_aggregate()"
     )
 
+    op.execute(
+        """
+        CREATE OR REPLACE FUNCTION validate_kalshi_paper_account_journal()
+        RETURNS trigger AS $$
+        DECLARE
+            target_account_id text;
+            account_row kalshi_paper_accounts%ROWTYPE;
+            decision_count bigint;
+            min_sequence bigint;
+            max_sequence bigint;
+            first_cash_before numeric;
+            latest_cash_after numeric;
+            broken_links bigint;
+        BEGIN
+            IF TG_TABLE_NAME = 'kalshi_paper_accounts' THEN
+                target_account_id := NEW.id;
+            ELSE
+                target_account_id := NEW.account_id;
+            END IF;
+            SELECT * INTO account_row
+              FROM kalshi_paper_accounts
+             WHERE id = target_account_id;
+            IF NOT FOUND THEN
+                RAISE EXCEPTION 'Kalshi paper account does not exist';
+            END IF;
+            SELECT count(*), min(account_sequence), max(account_sequence)
+              INTO decision_count, min_sequence, max_sequence
+              FROM kalshi_paper_decisions
+             WHERE account_id = target_account_id;
+            IF account_row.journal_sequence = 0 THEN
+                IF decision_count <> 0 OR account_row.cash_balance IS DISTINCT FROM account_row.starting_cash THEN
+                    RAISE EXCEPTION 'Kalshi paper account journal does not match opening state';
+                END IF;
+                RETURN NEW;
+            END IF;
+            IF decision_count <> account_row.journal_sequence
+               OR min_sequence <> 1
+               OR max_sequence <> account_row.journal_sequence THEN
+                RAISE EXCEPTION 'Kalshi paper account journal sequence is not contiguous';
+            END IF;
+            SELECT cash_before INTO first_cash_before
+              FROM kalshi_paper_decisions
+             WHERE account_id = target_account_id AND account_sequence = 1;
+            SELECT cash_after INTO latest_cash_after
+              FROM kalshi_paper_decisions
+             WHERE account_id = target_account_id
+               AND account_sequence = account_row.journal_sequence;
+            SELECT count(*) INTO broken_links
+              FROM kalshi_paper_decisions current_decision
+              JOIN kalshi_paper_decisions previous_decision
+                ON previous_decision.account_id = current_decision.account_id
+               AND previous_decision.account_sequence = current_decision.account_sequence - 1
+             WHERE current_decision.account_id = target_account_id
+               AND current_decision.account_sequence > 1
+               AND current_decision.cash_before IS DISTINCT FROM previous_decision.cash_after;
+            IF first_cash_before IS DISTINCT FROM account_row.starting_cash
+               OR latest_cash_after IS DISTINCT FROM account_row.cash_balance
+               OR broken_links <> 0 THEN
+                RAISE EXCEPTION 'Kalshi paper account cash does not match immutable journal';
+            END IF;
+            RETURN NEW;
+        END;
+        $$ LANGUAGE plpgsql
+        """
+    )
+    op.execute(
+        "DROP TRIGGER IF EXISTS trg_kalshi_paper_accounts_validate_journal ON kalshi_paper_accounts"
+    )
+    op.execute(
+        "DROP TRIGGER IF EXISTS trg_kalshi_paper_decisions_validate_account_journal ON kalshi_paper_decisions"
+    )
+    op.execute(
+        "CREATE CONSTRAINT TRIGGER trg_kalshi_paper_accounts_validate_journal "
+        "AFTER INSERT OR UPDATE ON kalshi_paper_accounts DEFERRABLE INITIALLY DEFERRED "
+        "FOR EACH ROW EXECUTE FUNCTION validate_kalshi_paper_account_journal()"
+    )
+    op.execute(
+        "CREATE CONSTRAINT TRIGGER trg_kalshi_paper_decisions_validate_account_journal "
+        "AFTER INSERT ON kalshi_paper_decisions DEFERRABLE INITIALLY DEFERRED "
+        "FOR EACH ROW EXECUTE FUNCTION validate_kalshi_paper_account_journal()"
+    )
+
 
 def downgrade() -> None:
-    existing = table_names()
-    if "kalshi_paper_fills" in existing:
-        op.execute("DROP TRIGGER IF EXISTS trg_kalshi_paper_fills_fill_aggregate ON kalshi_paper_fills")
-        op.execute("DROP TRIGGER IF EXISTS trg_kalshi_paper_fills_immutable ON kalshi_paper_fills")
-        op.execute("DROP TRIGGER IF EXISTS trg_kalshi_paper_fills_truncate_immutable ON kalshi_paper_fills")
-        op.drop_table("kalshi_paper_fills")
-    if "kalshi_paper_decisions" in existing:
-        op.execute(
-            "DROP TRIGGER IF EXISTS trg_kalshi_paper_decisions_fill_aggregate ON kalshi_paper_decisions"
-        )
-        op.execute(
-            "DROP TRIGGER IF EXISTS trg_kalshi_paper_decisions_validate_intent ON kalshi_paper_decisions"
-        )
-        op.execute("DROP TRIGGER IF EXISTS trg_kalshi_paper_decisions_immutable ON kalshi_paper_decisions")
-        op.execute(
-            "DROP TRIGGER IF EXISTS trg_kalshi_paper_decisions_truncate_immutable ON kalshi_paper_decisions"
-        )
-        op.drop_table("kalshi_paper_decisions")
-    if "kalshi_paper_intents" in existing:
-        op.execute("DROP TRIGGER IF EXISTS trg_kalshi_paper_intents_immutable ON kalshi_paper_intents")
-        op.execute(
-            "DROP TRIGGER IF EXISTS trg_kalshi_paper_intents_truncate_immutable ON kalshi_paper_intents"
-        )
-        op.drop_table("kalshi_paper_intents")
-    if "kalshi_paper_accounts" in existing:
-        op.drop_table("kalshi_paper_accounts")
-    op.execute("DROP FUNCTION IF EXISTS validate_kalshi_paper_fill_aggregate()")
-    op.execute("DROP FUNCTION IF EXISTS validate_kalshi_paper_decision_intent()")
-    op.execute("DROP FUNCTION IF EXISTS reject_kalshi_paper_evidence_mutation()")
+    return

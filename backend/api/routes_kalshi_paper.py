@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Literal, Self
 
 from fastapi import APIRouter, HTTPException, Query
-from pydantic import BaseModel, Field, StrictStr, model_validator
+from pydantic import BaseModel, ConfigDict, Field, StrictStr, model_validator
 from sqlalchemy.exc import IntegrityError, OperationalError
 
 from models.database import AsyncSessionLocal, async_engine
@@ -21,11 +21,15 @@ paper_service = KalshiPaperService(session_factory=AsyncSessionLocal, database_e
 
 
 class CreatePaperAccountRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     name: StrictStr = Field(..., min_length=1, max_length=100)
     starting_cash: StrictStr = Field(..., min_length=1, max_length=80)
 
 
 class PaperDecisionRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     account_id: StrictStr = Field(..., min_length=1, max_length=100)
     decision_id: StrictStr = Field(..., min_length=1, max_length=200)
     opportunity_id: StrictStr = Field(..., min_length=1, max_length=200)

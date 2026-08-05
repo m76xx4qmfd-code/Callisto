@@ -103,6 +103,7 @@ jobs:
           npm run test:kalshi-portfolio-wire
           npm run test:kalshi-portfolio-component
           npm run test:kalshi-paper-wire
+          npm run test:kalshi-paper-component
 
   frontend-build:
     name: Frontend Build

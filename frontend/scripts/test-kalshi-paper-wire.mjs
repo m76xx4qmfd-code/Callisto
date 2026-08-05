@@ -93,6 +93,7 @@ assert.throws(() => requireKalshiPaperDecision({ ...decision, reason: null }), /
 assert.throws(() => requireKalshiPaperDecision({ ...decision, book_evidence_hash: 'bad' }), /sha-256/i)
 assert.throws(() => requireKalshiPaperEligibility({ ...eligibility, order_side: 'sell' }), /enum/i)
 assert.throws(() => requireKalshiPaperDecisionInput({ ...pendingAttempt, action: 'pass' }), /cannot include/i)
+assert.throws(() => requireKalshiPaperDecisionInput({ ...pendingAttempt, unexpected: 'value' }), /unknown field/i)
 assert.throws(
   () => requireKalshiPaperDecision({ ...decision, fills: [{ ...decision.fills[0], price: 0.575 }] }),
   /text is required|exact decimal/i,

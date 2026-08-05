@@ -56,6 +56,24 @@ def test_account_request_requires_exact_string_cash() -> None:
         CreatePaperAccountRequest(name="Paper", starting_cash=100)  # type: ignore[arg-type]
 
 
+def test_paper_requests_reject_unknown_fields() -> None:
+    with pytest.raises(ValidationError, match="extra_forbidden"):
+        CreatePaperAccountRequest.model_validate(
+            {"name": "Paper", "starting_cash": "100.00", "unexpected": "value"}
+        )
+    with pytest.raises(ValidationError, match="extra_forbidden"):
+        PaperDecisionRequest.model_validate(
+            {
+                "account_id": "account",
+                "decision_id": "decision",
+                "opportunity_id": "opportunity",
+                "opportunity_revision": "a" * 64,
+                "action": "pass",
+                "unexpected": "value",
+            }
+        )
+
+
 @pytest.mark.asyncio
 async def test_decision_route_maps_conflict_and_ineligibility(monkeypatch) -> None:
     request = PaperDecisionRequest(

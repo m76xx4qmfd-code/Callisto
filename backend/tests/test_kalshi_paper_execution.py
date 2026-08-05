@@ -13,12 +13,14 @@ from services.kalshi_paper_execution import (
     KalshiPaperProtocolError,
     PaperBook,
     PaperBookLevel,
+    PaperPriceRange,
     parse_quantity,
     simulate_buy_ioc,
 )
 
 
 NOW = datetime(2026, 8, 5, 12, 0, 0, tzinfo=timezone.utc)
+PRICE_RANGES = (PaperPriceRange(start=Decimal("0"), end=Decimal("1"), step=Decimal("0.000001")),)
 
 
 def _book(*, yes: tuple[tuple[str, str], ...] = (), no: tuple[tuple[str, str], ...] = ()) -> PaperBook:
@@ -40,6 +42,7 @@ def test_buy_yes_sweeps_descending_no_bids_at_complementary_prices() -> None:
         outcome="yes",
         quantity=Decimal("4.00"),
         limit_price=Decimal("0.600000"),
+        price_ranges=PRICE_RANGES,
     )
 
     assert [(fill.quantity, fill.price) for fill in result.fills] == [
@@ -59,6 +62,7 @@ def test_buy_no_sweeps_descending_yes_bids_and_partially_fills() -> None:
         outcome="no",
         quantity=Decimal("5.00"),
         limit_price=Decimal("0.650000"),
+        price_ranges=PRICE_RANGES,
     )
 
     assert [(fill.quantity, fill.price) for fill in result.fills] == [
@@ -77,6 +81,7 @@ def test_ioc_no_cross_is_terminal_no_fill() -> None:
         outcome="yes",
         quantity=Decimal("2.00"),
         limit_price=Decimal("0.650000"),
+        price_ranges=PRICE_RANGES,
     )
 
     assert result.status == "no_fill"
@@ -97,6 +102,7 @@ def test_fill_math_is_independent_of_ambient_decimal_context() -> None:
             outcome="yes",
             quantity=Decimal("999999999999999999.99"),
             limit_price=Decimal("0.123456"),
+            price_ranges=PRICE_RANGES,
         )
     finally:
         getcontext().prec = original.prec
@@ -115,6 +121,7 @@ def test_fill_engine_rejects_excess_scale_and_invalid_order_shape() -> None:
             outcome="yes",
             quantity=Decimal("1.001"),
             limit_price=Decimal("0.500000"),
+            price_ranges=PRICE_RANGES,
         )
     with pytest.raises(KalshiPaperProtocolError, match="limit_price has more than 6 decimal places"):
         simulate_buy_ioc(
@@ -122,6 +129,7 @@ def test_fill_engine_rejects_excess_scale_and_invalid_order_shape() -> None:
             outcome="yes",
             quantity=Decimal("1.00"),
             limit_price=Decimal("0.5000001"),
+            price_ranges=PRICE_RANGES,
         )
     with pytest.raises(KalshiPaperProtocolError, match="outcome"):
         simulate_buy_ioc(
@@ -129,10 +137,31 @@ def test_fill_engine_rejects_excess_scale_and_invalid_order_shape() -> None:
             outcome="maybe",  # type: ignore[arg-type]
             quantity=Decimal("1.00"),
             limit_price=Decimal("0.500000"),
+            price_ranges=PRICE_RANGES,
         )
     assert parse_quantity("100000000000000000000000000000000000000.00") == Decimal(
         "100000000000000000000000000000000000000.00"
     )
+
+
+def test_fill_engine_rejects_off_tick_limit_and_depth() -> None:
+    cent_ranges = (PaperPriceRange(start=Decimal("0"), end=Decimal("1"), step=Decimal("0.01")),)
+    with pytest.raises(KalshiPaperProtocolError, match="limit_price is not valid"):
+        simulate_buy_ioc(
+            book=_book(no=(("0.450000", "1.00"),)),
+            outcome="yes",
+            quantity=Decimal("1.00"),
+            limit_price=Decimal("0.555000"),
+            price_ranges=cent_ranges,
+        )
+    with pytest.raises(KalshiPaperProtocolError, match="book price is not valid"):
+        simulate_buy_ioc(
+            book=_book(no=(("0.455000", "1.00"),)),
+            outcome="yes",
+            quantity=Decimal("1.00"),
+            limit_price=Decimal("0.550000"),
+            price_ranges=cent_ranges,
+        )
 
 
 @pytest.mark.asyncio
@@ -157,7 +186,7 @@ async def test_read_only_client_fetches_strict_fee_waived_quote_without_auth() -
                         "close_time": "2026-08-05T13:00:00Z",
                         "latest_expiration_time": "2026-08-05T14:00:00Z",
                         "price_level_structure": "linear_cent",
-                        "price_ranges": [],
+                        "price_ranges": [{"start": "0.0000", "end": "1.0000", "step": "0.0010"}],
                     }
                 },
             )
@@ -184,8 +213,12 @@ async def test_read_only_client_fetches_strict_fee_waived_quote_without_auth() -
     assert quote.market.fee == Decimal("0")
     assert quote.market.fee_rule_version == "kalshi-market-fee-waiver-v1"
     assert quote.market.fee_provenance["openapi_sha256"] == KALSHI_OPENAPI_SHA256
+    assert quote.market.price_ranges == (
+        PaperPriceRange(start=Decimal("0.0000"), end=Decimal("1.0000"), step=Decimal("0.0010")),
+    )
+    assert '"price_ranges"' in quote.market.evidence_json
     assert quote.book.no_bids[0] == PaperBookLevel(price=Decimal("0.450000"), quantity=Decimal("2.00"))
-    assert len(seen) == 2
+    assert len(seen) == 3
     assert all(request.method == "GET" for request in seen)
     assert all("authorization" not in request.headers for request in seen)
     assert all("cookie" not in request.headers for request in seen)
@@ -204,6 +237,12 @@ def test_read_only_client_has_no_venue_mutation_surface() -> None:
         ({"status": "closed"}, "Wed, 05 Aug 2026 12:00:00 GMT", "market is not active"),
         ({"market_type": "scalar"}, "Wed, 05 Aug 2026 12:00:00 GMT", "binary"),
         ({"notional_value_dollars": "10.000000"}, "Wed, 05 Aug 2026 12:00:00 GMT", "notional"),
+        ({"price_ranges": []}, "Wed, 05 Aug 2026 12:00:00 GMT", "non-empty"),
+        (
+            {"price_ranges": [{"start": "0", "end": "1", "step": "0"}]},
+            "Wed, 05 Aug 2026 12:00:00 GMT",
+            "invalid step",
+        ),
         ({"fee_waiver_expiration_time": None}, "Wed, 05 Aug 2026 12:00:00 GMT", "fee waiver"),
         (
             {"fee_waiver_expiration_time": "2026-08-05T11:59:59Z"},
@@ -226,7 +265,7 @@ async def test_read_only_client_fails_closed_on_unsupported_or_stale_market(
         "close_time": "2026-08-05T13:00:00Z",
         "latest_expiration_time": "2026-08-05T14:00:00Z",
         "price_level_structure": "linear_cent",
-        "price_ranges": [],
+        "price_ranges": [{"start": "0.0000", "end": "1.0000", "step": "0.0010"}],
     }
     market.update(market_patch)
 
@@ -260,7 +299,7 @@ async def test_read_only_client_rejects_bare_numeric_fixed_point_and_does_not_re
                         "close_time": "2026-08-05T13:00:00Z",
                         "latest_expiration_time": "2026-08-05T14:00:00Z",
                         "price_level_structure": "linear_cent",
-                        "price_ranges": [],
+                        "price_ranges": [{"start": "0.0000", "end": "1.0000", "step": "0.0010"}],
                     }
                 },
             )
@@ -294,13 +333,22 @@ def test_max_source_age_boundary_is_exact() -> None:
 
 @pytest.mark.asyncio
 async def test_fee_waiver_must_still_be_active_at_orderbook_observation() -> None:
-    fetched_times = iter((NOW, NOW + timedelta(minutes=10)))
+    fetched_times = iter((NOW, NOW + timedelta(minutes=10), NOW + timedelta(minutes=10)))
+    market_reads = 0
 
     def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal market_reads
         if request.url.path.endswith("/markets/KXTEST-26"):
+            market_reads += 1
             return httpx.Response(
                 200,
-                headers={"Date": "Wed, 05 Aug 2026 12:00:00 GMT"},
+                headers={
+                    "Date": (
+                        "Wed, 05 Aug 2026 12:00:00 GMT"
+                        if market_reads == 1
+                        else "Wed, 05 Aug 2026 12:10:00 GMT"
+                    )
+                },
                 json={
                     "market": {
                         "ticker": "KXTEST-26",
@@ -312,6 +360,7 @@ async def test_fee_waiver_must_still_be_active_at_orderbook_observation() -> Non
                         "close_time": "2026-08-05T13:00:00Z",
                         "latest_expiration_time": "2026-08-05T14:00:00Z",
                         "price_level_structure": "linear_cent",
+                        "price_ranges": [{"start": "0.0000", "end": "1.0000", "step": "0.0010"}],
                     }
                 },
             )
@@ -325,5 +374,45 @@ async def test_fee_waiver_must_still_be_active_at_orderbook_observation() -> Non
         transport=httpx.MockTransport(handler),
         now=lambda: next(fetched_times),
     )
-    with pytest.raises(KalshiPaperProtocolError, match="fee waiver is not active at orderbook observation"):
+    with pytest.raises(KalshiPaperProtocolError, match="fee waiver is not active"):
         await client.fetch_quote("KXTEST-26")
+
+
+@pytest.mark.asyncio
+async def test_fee_waiver_revocation_after_orderbook_fails_closed() -> None:
+    market_reads = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal market_reads
+        if request.url.path.endswith("/markets/KXTEST-26"):
+            market_reads += 1
+            return httpx.Response(
+                200,
+                headers={"Date": "Wed, 05 Aug 2026 12:00:00 GMT"},
+                json={
+                    "market": {
+                        "ticker": "KXTEST-26",
+                        "event_ticker": "KXTEST",
+                        "market_type": "binary",
+                        "status": "active",
+                        "notional_value_dollars": "1.000000",
+                        "fee_waiver_expiration_time": (
+                            "2026-08-05T12:10:00Z" if market_reads == 1 else None
+                        ),
+                        "close_time": "2026-08-05T13:00:00Z",
+                        "latest_expiration_time": "2026-08-05T14:00:00Z",
+                        "price_level_structure": "deci_cent",
+                        "price_ranges": [{"start": "0.0000", "end": "1.0000", "step": "0.0010"}],
+                    }
+                },
+            )
+        return httpx.Response(
+            200,
+            headers={"Date": "Wed, 05 Aug 2026 12:00:00 GMT"},
+            json={"orderbook_fp": {"yes_dollars": [["0.400000", "1.00"]], "no_dollars": []}},
+        )
+
+    client = KalshiPaperMarketDataClient(transport=httpx.MockTransport(handler), now=lambda: NOW)
+    with pytest.raises(KalshiPaperProtocolError, match="fee waiver expiration is required"):
+        await client.fetch_quote("KXTEST-26")
+    assert market_reads == 2
