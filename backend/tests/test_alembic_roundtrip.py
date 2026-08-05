@@ -144,9 +144,9 @@ async def test_head_migration_downgrade_upgrade_roundtrip() -> None:
 
 @pytest.mark.db
 @pytest.mark.asyncio
-async def test_head_migration_from_previous_revision_creates_runtime_snapshot_schema() -> None:
+async def test_head_migration_from_previous_revision_creates_and_reverses_paper_schema() -> None:
     import asyncpg
-    from sqlalchemy import MetaData, inspect
+    from sqlalchemy import MetaData, inspect, text
 
     from tests.postgres_test_db import build_postgres_session_factory
 
@@ -167,33 +167,105 @@ async def test_head_migration_from_previous_revision_creates_runtime_snapshot_sc
 
         async with engine.connect() as conn:
 
-            def _upgrade_head(sync_conn) -> tuple[set[str], object]:
+            def _upgrade_head(sync_conn) -> tuple[set[str], set[str], set[str], set[str], set[str]]:
                 cfg = _build_alembic_config(sync_conn)
                 command.stamp(cfg, previous_revision)
                 command.upgrade(cfg, head_revision)
-                columns = inspect(sync_conn).get_columns("kalshi_portfolio_runtime_snapshots")
-                return {column["name"] for column in columns}, next(
-                    column for column in columns if column["name"] == "lag_seconds"
-                )
+                inspector = inspect(sync_conn)
+                tables = set(inspector.get_table_names())
+                intents = {column["name"] for column in inspector.get_columns("kalshi_paper_intents")}
+                decisions = {column["name"] for column in inspector.get_columns("kalshi_paper_decisions")}
+                fills = {column["name"] for column in inspector.get_columns("kalshi_paper_fills")}
+                decision_foreign_keys = {
+                    foreign_key["name"] for foreign_key in inspector.get_foreign_keys("kalshi_paper_decisions")
+                }
+                return tables, intents, decisions, fills, decision_foreign_keys
 
-            runtime_columns, lag_seconds_column = await conn.run_sync(_upgrade_head)
+            tables, intent_columns, decision_columns, fill_columns, decision_foreign_keys = await conn.run_sync(
+                _upgrade_head
+            )
+            trigger_names = set(
+                (
+                    await conn.execute(
+                        text(
+                            "SELECT tgname FROM pg_trigger "
+                            "WHERE tgrelid IN ('kalshi_paper_intents'::regclass, "
+                            "'kalshi_paper_decisions'::regclass, "
+                            "'kalshi_paper_fills'::regclass) AND NOT tgisinternal"
+                        )
+                    )
+                ).scalars()
+            )
 
-        assert runtime_columns == {
-            "principal_fingerprint",
-            "updated_at",
-            "last_run_at",
-            "running",
-            "enabled",
-            "current_activity",
-            "interval_seconds",
-            "lag_seconds",
-            "last_error",
-            "stats_json",
-        }
-        lag_seconds_type = lag_seconds_column["type"]
-        assert getattr(lag_seconds_type, "precision", None) == 24
-        assert getattr(lag_seconds_type, "scale", None) == 12
-        assert lag_seconds_column["nullable"] is True
+            paper_tables = {
+                "kalshi_paper_accounts",
+                "kalshi_paper_intents",
+                "kalshi_paper_decisions",
+                "kalshi_paper_fills",
+            }
+            assert paper_tables <= tables
+            assert {
+                "account_id",
+                "decision_id",
+                "request_hash",
+                "opportunity_revision",
+                "opportunity_snapshot_json",
+                "requested_quantity",
+                "limit_price",
+                "created_at",
+            } <= intent_columns
+            assert {
+                "account_id",
+                "decision_id",
+                "account_sequence",
+                "request_hash",
+                "opportunity_revision",
+                "requested_quantity",
+                "limit_price",
+                "filled_quantity",
+                "remaining_quantity",
+                "notional",
+                "fee",
+                "cash_before",
+                "cash_after",
+            } <= decision_columns
+            assert {
+                "account_id",
+                "decision_id",
+                "sequence",
+                "quantity",
+                "price",
+                "notional",
+                "fee",
+                "source_bid_price",
+                "source_side",
+            } <= fill_columns
+            assert "fk_kalshi_paper_decisions_intent" in decision_foreign_keys
+            assert {
+                "trg_kalshi_paper_intents_immutable",
+                "trg_kalshi_paper_intents_truncate_immutable",
+                "trg_kalshi_paper_decisions_immutable",
+                "trg_kalshi_paper_decisions_truncate_immutable",
+                "trg_kalshi_paper_decisions_fill_aggregate",
+                "trg_kalshi_paper_fills_immutable",
+                "trg_kalshi_paper_fills_truncate_immutable",
+                "trg_kalshi_paper_fills_fill_aggregate",
+            } <= trigger_names
+
+            def _downgrade_and_reupgrade(sync_conn) -> tuple[set[str], set[str]]:
+                cfg = _build_alembic_config(sync_conn)
+                command.downgrade(cfg, previous_revision)
+                absent = set(inspect(sync_conn).get_table_names())
+                command.upgrade(cfg, head_revision)
+                restored = set(inspect(sync_conn).get_table_names())
+                return absent, restored
+
+            after_downgrade, after_reupgrade = await conn.run_sync(_downgrade_and_reupgrade)
+            assert "kalshi_paper_accounts" not in after_downgrade
+            assert "kalshi_paper_intents" not in after_downgrade
+            assert "kalshi_paper_decisions" not in after_downgrade
+            assert "kalshi_paper_fills" not in after_downgrade
+            assert paper_tables <= after_reupgrade
     finally:
         await engine.dispose()
 

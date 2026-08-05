@@ -102,6 +102,7 @@ jobs:
           npx tsc --noEmit
           npm run test:kalshi-portfolio-wire
           npm run test:kalshi-portfolio-component
+          npm run test:kalshi-paper-wire
 
   frontend-build:
     name: Frontend Build

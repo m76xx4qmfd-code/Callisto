@@ -39,7 +39,9 @@ async def postgres_session_factory():
 @pytest_asyncio.fixture(autouse=True)
 async def _reset_database_state(postgres_session_factory):
     table_names = [
-        _quote_ident(table.name) for table in Base.metadata.sorted_tables if not table.info.get("immutable_rows", False)
+        _quote_ident(table.name)
+        for table in Base.metadata.sorted_tables
+        if not table.info.get("immutable_rows", False) and not table.info.get("contains_immutable_rows", False)
     ]
     if not table_names:
         return
