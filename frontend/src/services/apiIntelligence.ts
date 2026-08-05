@@ -1,6 +1,6 @@
 import { api, getStrategyManagerItems, unwrapApiData, unwrapStrategyManagerPayload } from './apiClient'
 import type { Opportunity } from './apiCore'
-import type { KalshiSettings } from './apiSettings'
+
 import type { Trader } from './apiTraders'
 
 // ==================== AI INTELLIGENCE ====================
@@ -288,69 +288,201 @@ export const archiveAIChatSession = async (sessionId: string): Promise<{ status:
   return unwrapApiData(data)
 }
 
-// ==================== KALSHI ACCOUNT ====================
+// ==================== KALSHI AUTHORITATIVE PORTFOLIO ====================
 
-export interface KalshiAccountStatus {
-  platform: string
-  authenticated: boolean
-  member_id: string | null
-  email: string | null
-  balance: {
-    balance: number
-    payout: number
-    available: number
-    reserved: number
-    currency: string
+export type KalshiPortfolioReadiness =
+  | 'disabled'
+  | 'never_synchronized'
+  | 'healthy'
+  | 'degraded'
+  | 'stale'
+
+export interface KalshiPortfolioScope {
+  orders_and_fills: { kind: 'all_subaccounts' }
+  balance: { kind: 'account_aggregate' }
+  positions: { kind: 'subaccount'; subaccount_numbers: number[] }
+  settlements: { kind: 'subaccount'; subaccount_numbers: number[] }
+}
+
+// Fixed-point values stay as text from the durable API through rendering.
+// Integer wire values are normalized to text by getKalshiPortfolioSnapshot so
+// account evidence is never fed into JavaScript number arithmetic.
+export type KalshiExactValue = string
+
+export interface KalshiPortfolioBalance {
+  balance_cents: KalshiExactValue
+  balance_dollars: KalshiExactValue
+  portfolio_value_cents: KalshiExactValue
+  updated_ts: KalshiExactValue
+  balance_breakdown: Array<{
+    exchange_index: KalshiExactValue
+    balance: KalshiExactValue
+  }>
+}
+
+export interface KalshiPortfolioMarketPosition {
+  ticker: string
+  total_traded: KalshiExactValue
+  position: KalshiExactValue
+  market_exposure: KalshiExactValue
+  realized_pnl: KalshiExactValue
+  fees_paid: KalshiExactValue
+  last_updated_ts: string
+}
+
+export interface KalshiPortfolioEventPosition {
+  event_ticker: string
+  total_cost: KalshiExactValue
+  total_cost_shares: KalshiExactValue
+  event_exposure: KalshiExactValue
+  realized_pnl: KalshiExactValue
+  fees_paid: KalshiExactValue
+}
+
+export interface KalshiPortfolioOrder {
+  order_id: string
+  provider_user_hash: string
+  client_order_id: string
+  ticker: string
+  outcome_side: 'yes' | 'no'
+  book_side: 'bid' | 'ask'
+  order_type: 'limit' | 'market'
+  status: 'resting' | 'canceled' | 'executed'
+  yes_price: KalshiExactValue
+  no_price: KalshiExactValue
+  initial_count: KalshiExactValue
+  fill_count: KalshiExactValue
+  remaining_count: KalshiExactValue
+  taker_fees: KalshiExactValue
+  maker_fees: KalshiExactValue
+  taker_fill_cost: KalshiExactValue
+  maker_fill_cost: KalshiExactValue
+  created_time: string | null
+  last_update_time: string | null
+  expiration_time: string | null
+  subaccount_number: KalshiExactValue | null
+  exchange_index: KalshiExactValue | null
+}
+
+export interface KalshiPortfolioFill {
+  fill_id: string
+  trade_id: string
+  order_id: string
+  ticker: string
+  market_ticker: string
+  outcome_side: 'yes' | 'no'
+  book_side: 'bid' | 'ask'
+  count: KalshiExactValue
+  yes_price: KalshiExactValue
+  no_price: KalshiExactValue
+  is_taker: boolean
+  fee_cost: KalshiExactValue
+  created_time: string | null
+  subaccount_number: KalshiExactValue | null
+  ts: KalshiExactValue | null
+}
+
+export interface KalshiPortfolioSettlement {
+  ticker: string
+  event_ticker: string
+  market_result: 'yes' | 'no' | 'scalar'
+  yes_count: KalshiExactValue
+  yes_total_cost: KalshiExactValue
+  no_count: KalshiExactValue
+  no_total_cost: KalshiExactValue
+  revenue_cents: KalshiExactValue
+  settled_time: string
+  fee_cost: KalshiExactValue
+  settlement_value_cents: KalshiExactValue | null
+}
+
+export interface KalshiPortfolioSnapshot {
+  principal_fingerprint: string | null
+  retry_allowed: false
+  readiness: KalshiPortfolioReadiness
+  reason: string
+  scope: KalshiPortfolioScope | null
+  projection_id: string | null
+  last_healthy_as_of: string | null
+  balance: KalshiPortfolioBalance | null
+  positions: {
+    subaccount_number: KalshiExactValue
+    market_positions: KalshiPortfolioMarketPosition[]
+    event_positions: KalshiPortfolioEventPosition[]
   } | null
-  positions_count: number
+  settlements: {
+    subaccount_number: KalshiExactValue
+    settlements: KalshiPortfolioSettlement[]
+  } | null
+  orders: KalshiPortfolioOrder[]
+  fills: KalshiPortfolioFill[]
+  unknown_activity: {
+    order_ids: string[]
+    client_order_ids: string[]
+    fill_ids: string[]
+  }
+  components: Record<string, { observed_at: string | null }>
+  component_skew_seconds: string | null
+  gaps: string[]
+  latest_attempt: {
+    projection_id: string
+    status: 'complete' | 'incomplete' | 'failed'
+    reason: string
+    completed_at: string
+  } | null
+  sync_runtime: {
+    running: boolean
+    ready: boolean
+    degraded: boolean
+    principal_matches: boolean
+    fresh: boolean
+    updated_at: string | null
+    error_type: string | null
+  }
 }
 
-export interface KalshiPosition {
-  token_id: string
-  market_id: string
-  event_slug?: string
-  market_question: string
-  outcome: string
-  size: number
-  average_cost: number
-  current_price: number
-  unrealized_pnl: number
-  platform: string
+export const getKalshiPortfolioSnapshot = async (
+  principalFingerprint?: string | null
+): Promise<KalshiPortfolioSnapshot> => {
+  const { data } = await api.get('/kalshi/portfolio/snapshot', {
+    params: principalFingerprint ? { principal_fingerprint: principalFingerprint } : undefined,
+  })
+  const snapshot = unwrapApiData(data) as KalshiPortfolioSnapshot
+  if (snapshot.balance) {
+    snapshot.balance.balance_cents = String(snapshot.balance.balance_cents)
+    snapshot.balance.portfolio_value_cents = String(snapshot.balance.portfolio_value_cents)
+    snapshot.balance.updated_ts = String(snapshot.balance.updated_ts)
+    snapshot.balance.balance_breakdown = snapshot.balance.balance_breakdown.map((entry) => ({
+      ...entry,
+      exchange_index: String(entry.exchange_index),
+    }))
+  }
+  if (snapshot.positions) snapshot.positions.subaccount_number = String(snapshot.positions.subaccount_number)
+  if (snapshot.settlements) {
+    snapshot.settlements.subaccount_number = String(snapshot.settlements.subaccount_number)
+    snapshot.settlements.settlements = snapshot.settlements.settlements.map((settlement) => ({
+      ...settlement,
+      revenue_cents: String(settlement.revenue_cents),
+      settlement_value_cents: settlement.settlement_value_cents == null
+        ? null
+        : String(settlement.settlement_value_cents),
+    }))
+  }
+  return snapshot
 }
 
-export const getKalshiStatus = async (): Promise<KalshiAccountStatus> => {
-  const { data } = await api.get('/kalshi/status')
-  return unwrapApiData(data)
+export function getKalshiPrincipalChoices(error: unknown): string[] {
+  const response = (error as { response?: { status?: number; data?: unknown } } | null)?.response
+  if (response?.status !== 409) return []
+  const detail = (response.data as { detail?: unknown } | null)?.detail
+  if (!detail || typeof detail !== 'object') return []
+  const payload = detail as { code?: unknown; principal_fingerprints?: unknown }
+  if (payload.code !== 'principal_ambiguous' || !Array.isArray(payload.principal_fingerprints)) return []
+  return payload.principal_fingerprints.filter(
+    (fingerprint): fingerprint is string => typeof fingerprint === 'string' && /^[0-9a-f]{64}$/.test(fingerprint)
+  )
 }
 
-export const loginKalshi = async (params: {
-  email?: string
-  password?: string
-  api_key?: string
-}): Promise<{ status: string; message: string; authenticated: boolean; member_id?: string }> => {
-  const { data } = await api.post('/kalshi/login', params)
-  return unwrapApiData(data)
-}
-
-export const logoutKalshi = async (): Promise<{ status: string; message: string }> => {
-  const { data } = await api.post('/kalshi/logout')
-  return unwrapApiData(data)
-}
-
-export const getKalshiBalance = async (): Promise<{ balance: number; available: number; reserved: number; currency: string }> => {
-  const { data } = await api.get('/kalshi/balance')
-  return unwrapApiData(data)
-}
-
-export const getKalshiPositions = async (): Promise<KalshiPosition[]> => {
-  const { data } = await api.get('/kalshi/positions')
-  return unwrapApiData(data)
-}
-
-export const updateKalshiSettings = async (settings: Partial<KalshiSettings>): Promise<{ status: string; message: string }> => {
-  const { data } = await api.put('/settings/kalshi', settings)
-  return unwrapApiData(data)
-}
 
 // ==================== NEWS WORKFLOW (Independent Pipeline) ====================
 

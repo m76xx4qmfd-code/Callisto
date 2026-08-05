@@ -27,22 +27,20 @@ import {
   TrendingUp,
 } from 'lucide-react'
 import { cn } from '../lib/utils'
-import { buildKalshiMarketUrl, buildPolymarketMarketUrl } from '../lib/marketUrls'
+import { buildPolymarketMarketUrl } from '../lib/marketUrls'
 import { selectedAccountIdAtom, themeAtom } from '../store/atoms'
 import {
   adoptTraderLiveWalletPosition,
   getAccountPositions,
   getAllTraderOrders,
   getCryptoMarkets,
-  getKalshiPositions,
-  getKalshiStatus,
+
   getSimulationAccounts,
   getTraderMarketHistory,
   getTraders,
   getTradingPositions,
   type CryptoMarket,
-  type KalshiAccountStatus,
-  type KalshiPosition,
+
   type SimulationAccount,
   type SimulationPosition,
   type Trader,
@@ -442,7 +440,7 @@ export default function PositionsPanel() {
   const shouldShowSandbox = viewMode === 'sandbox' || viewMode === 'all'
   const shouldShowLive = viewMode === 'live' || viewMode === 'all'
   const shouldFetchPolymarketLive = shouldShowLive && (liveVenueFilter === 'all' || liveVenueFilter === 'polymarket')
-  const shouldFetchKalshiLive = shouldShowLive && (liveVenueFilter === 'all' || liveVenueFilter === 'kalshi')
+
 
   const {
     data: accounts = [],
@@ -555,37 +553,6 @@ export default function PositionsPanel() {
     retry: false,
   })
 
-  const {
-    data: kalshiStatus,
-    isLoading: kalshiStatusLoading,
-    refetch: refetchKalshiStatus,
-  } = useQuery<KalshiAccountStatus>({
-    queryKey: ['kalshi-status'],
-    queryFn: getKalshiStatus,
-    enabled: shouldFetchKalshiLive,
-    retry: false,
-  })
-
-  const {
-    data: kalshiLivePositions = [],
-    dataUpdatedAt: kalshiLiveUpdatedAt,
-    isLoading: kalshiLiveLoading,
-    refetch: refetchKalshiLivePositions,
-  } = useQuery<KalshiPosition[]>({
-    queryKey: ['positions-panel', 'kalshi-live-open-positions'],
-    queryFn: async () => {
-      try {
-        return await getKalshiPositions()
-      } catch {
-        return []
-      }
-    },
-    enabled: shouldFetchKalshiLive && Boolean(kalshiStatus?.authenticated),
-    refetchInterval: shouldFetchKalshiLive && Boolean(kalshiStatus?.authenticated) ? 5000 : false,
-    staleTime: 0,
-    refetchOnMount: 'always',
-    retry: false,
-  })
 
   const simulationRows = useMemo<PositionRow[]>(() => {
     return simulationPayload.positions.map((position) => {
@@ -991,60 +958,12 @@ export default function PositionsPanel() {
     })
   }, [managedBotByTokenId, polymarketLivePositions, polymarketLiveUpdatedAt])
 
-  const kalshiLiveRows = useMemo<PositionRow[]>(() => {
-    const fallbackMarkTs = kalshiLiveUpdatedAt > 0
-      ? new Date(kalshiLiveUpdatedAt).toISOString()
-      : null
-    const now = Date.now()
-    const freshCutoff = now - LIVE_MARK_FRESH_MS
-    return kalshiLivePositions.map((position) => {
-      const record = position as unknown as Record<string, unknown>
-      const costBasis = position.size * position.average_cost
-      const marketValue = position.size * position.current_price
-      const unrealizedPnl = position.unrealized_pnl
-      const pnlPercent = costBasis > 0 ? (unrealizedPnl / costBasis) * 100 : 0
-      const side = normalizeDirection(position.outcome)
-      const markUpdatedAt = readTimestamp(record, ['mark_updated_at', 'last_marked_at', 'updated_at']) || fallbackMarkTs
-      const markFresh = position.current_price > 0 && toTimestamp(markUpdatedAt) >= freshCutoff
-      const managed = managedBotByTokenId.get(normalizeTokenKey(position.token_id))
-      return {
-        key: `kalshi-live:${position.market_id}:${position.token_id}:${position.outcome}`,
-        venue: 'kalshi-live',
-        venueLabel: 'Kalshi Live',
-        accountLabel: 'Kalshi',
-        marketId: position.market_id,
-        marketQuestion: position.market_question,
-        side,
-        sideLabel: side,
-        status: 'open',
-        size: position.size,
-        entryPrice: position.average_cost,
-        currentPrice: position.current_price,
-        costBasis,
-        marketValue,
-        unrealizedPnl,
-        pnlPercent,
-        openedAt: markUpdatedAt,
-        markUpdatedAt,
-        markFresh,
-        tokenId: position.token_id,
-        managedByBot: managed?.traderName || null,
-        managedBotId: managed?.traderId || null,
-        managedOrderId: managed?.orderId || null,
-        marketUrl: buildKalshiMarketUrl({
-          marketTicker: position.market_id,
-          eventTicker: position.event_slug,
-        }),
-        markMode: 'live',
-      }
-    })
-  }, [kalshiLivePositions, kalshiLiveUpdatedAt, managedBotByTokenId])
-
   const baseRows = useMemo(() => {
     if (viewMode === 'sandbox') return [...simulationRows, ...autotraderPaperRows]
-    if (viewMode === 'live') return [...polymarketLiveRows, ...kalshiLiveRows]
-    return [...simulationRows, ...autotraderPaperRows, ...polymarketLiveRows, ...kalshiLiveRows]
-  }, [viewMode, simulationRows, autotraderPaperRows, polymarketLiveRows, kalshiLiveRows])
+    const liveRows = liveVenueFilter === 'kalshi' ? [] : polymarketLiveRows
+    if (viewMode === 'live') return liveRows
+    return [...simulationRows, ...autotraderPaperRows, ...liveRows]
+  }, [viewMode, liveVenueFilter, simulationRows, autotraderPaperRows, polymarketLiveRows])
 
   const accountOptions = useMemo(() => {
     return Array.from(new Set(baseRows.map((row) => row.accountLabel))).sort((left, right) => left.localeCompare(right))
@@ -1209,7 +1128,6 @@ export default function PositionsPanel() {
     (shouldShowSandbox && (accountsLoading || simulationPositionsLoading || traderOrdersLoading))
     || (shouldShowLive && traderOrdersLoading)
     || (shouldFetchPolymarketLive && polymarketLiveLoading)
-    || (shouldFetchKalshiLive && (kalshiStatusLoading || (Boolean(kalshiStatus?.authenticated) && kalshiLiveLoading)))
   )
   const showLoadingSkeleton = isLoading && baseRows.length === 0
   const showModalHistorySkeleton = (
@@ -1226,12 +1144,7 @@ export default function PositionsPanel() {
     if (shouldFetchPolymarketLive) {
       void refetchPolymarketLivePositions()
     }
-    if (shouldFetchKalshiLive) {
-      void refetchKalshiStatus()
-      if (kalshiStatus?.authenticated) {
-        void refetchKalshiLivePositions()
-      }
-    }
+
   }
 
   const clearFilters = () => {
@@ -1307,6 +1220,23 @@ export default function PositionsPanel() {
             </Select>
           )}
         </div>
+
+        {shouldShowLive && (
+          <div className="flex items-center justify-between gap-3 rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs">
+            <span className="text-amber-200">
+              Kalshi is excluded from this numeric positions view. Use Accounts for exact authoritative portfolio evidence.
+            </span>
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              className="h-7 shrink-0"
+              onClick={() => window.dispatchEvent(new CustomEvent('navigate-to-tab', { detail: 'accounts' }))}
+            >
+              Open Accounts
+            </Button>
+          </div>
+        )}
 
         {/* Row 3: Filters */}
         <div className="flex flex-wrap items-end gap-2">

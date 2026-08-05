@@ -241,7 +241,7 @@ services:
     restart: unless-stopped
 
   # ---------------------------------------------------------------------
-  # Worker planes — three separate services on purpose.  See gui.py:233.
+  # Worker planes — separate services on purpose.  See gui.py:233.
   # Each plane runs ``python -m workers.host <plane>``.
   # ---------------------------------------------------------------------
   worker-trading:
@@ -281,6 +281,26 @@ services:
       HOMERUN_PROCESS_ROLE: worker
       HOMERUN_WORKER_PLANE: discovery
     volumes: *backend-volumes
+    depends_on:
+      backend:
+        condition: service_healthy
+    restart: unless-stopped
+
+  worker-kalshi-portfolio:
+    <<: *backend-image
+    container_name: homerun-worker-kalshi-portfolio
+    command: ["python", "-m", "workers.kalshi_portfolio_host"]
+    environment:
+      <<: *backend-env
+      HOMERUN_PROCESS_ROLE: worker
+      HOMERUN_WORKER_PLANE: kalshi_portfolio
+      # Read only after the DB-backed master switch is explicitly enabled.
+      KALSHI_PORTFOLIO_CREDENTIAL_MANIFEST: /run/secrets/kalshi/manifest.json
+    volumes:
+      - ./data/cache:/app/data/cache
+      - ./data/runtime:/app/data/runtime
+      - ./data/machine_learning:/app/data/machine_learning
+      - ${KALSHI_PORTFOLIO_CREDENTIAL_DIR:-./data/kalshi_portfolio_credentials}:/run/secrets/kalshi:ro
     depends_on:
       backend:
         condition: service_healthy

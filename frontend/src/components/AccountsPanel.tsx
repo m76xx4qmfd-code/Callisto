@@ -25,14 +25,14 @@ import { Card, CardContent } from './ui/card'
 import { Badge } from './ui/badge'
 import { Button } from './ui/button'
 import { ScrollArea } from './ui/scroll-area'
+import KalshiAuthoritativePortfolio from './KalshiAuthoritativePortfolio'
 import {
   getAccountPositions,
   getAccountTrades,
   getAllTraderOrders,
   getOrders,
-  getKalshiBalance,
-  getKalshiPositions,
-  getKalshiStatus,
+  getKalshiPrincipalChoices,
+  getKalshiPortfolioSnapshot,
   getSimulationAccounts,
   getTraderOrchestratorOverview,
   getTradingBalance,
@@ -136,6 +136,7 @@ export default function AccountsPanel({ onOpenSettings }: AccountsPanelProps) {
   const [workspaceTab, setWorkspaceTab] = useState<AccountsWorkspaceTab>(accountMode === 'live' ? 'live' : 'overview')
   const [sandboxView, setSandboxView] = useState<DeskView>('overview')
   const [liveView, setLiveView] = useState<DeskView>('overview')
+  const [kalshiPrincipal, setKalshiPrincipal] = useState<string | null>(null)
 
   const { data: sandboxAccounts = [] } = useQuery({
     queryKey: ['simulation-accounts'],
@@ -170,28 +171,22 @@ export default function AccountsPanel({ onOpenSettings }: AccountsPanelProps) {
     retry: false,
   })
 
-  const { data: kalshiStatus } = useQuery({
-    queryKey: ['kalshi-status'],
-    queryFn: getKalshiStatus,
+  const {
+    data: kalshiPortfolio,
+    error: kalshiPortfolioError,
+    isLoading: kalshiPortfolioLoading,
+    isFetching: kalshiPortfolioFetching,
+    refetch: refetchKalshiPortfolio,
+  } = useQuery({
+    queryKey: ['kalshi-portfolio-snapshot', kalshiPrincipal],
+    queryFn: () => getKalshiPortfolioSnapshot(kalshiPrincipal),
     refetchInterval: 10000,
     retry: false,
   })
-
-  const { data: kalshiPositions = [] } = useQuery({
-    queryKey: ['kalshi-positions'],
-    queryFn: getKalshiPositions,
-    enabled: !!kalshiStatus?.authenticated,
-    refetchInterval: 15000,
-    retry: false,
-  })
-
-  const { data: kalshiBalance } = useQuery({
-    queryKey: ['kalshi-balance'],
-    queryFn: getKalshiBalance,
-    enabled: !!kalshiStatus?.authenticated,
-    refetchInterval: 15000,
-    retry: false,
-  })
+  const kalshiPrincipalChoices = useMemo(
+    () => getKalshiPrincipalChoices(kalshiPortfolioError),
+    [kalshiPortfolioError]
+  )
 
   const { data: orchestratorOverview } = useQuery({
     queryKey: ['trader-orchestrator-overview'],
@@ -324,29 +319,30 @@ export default function AccountsPanel({ onOpenSettings }: AccountsPanelProps) {
   ])
 
   const kalshiSnapshot = useMemo<LiveVenueSnapshot>(() => {
-    const kalshiConnected = Boolean(kalshiStatus?.authenticated)
-    const visibleKalshiPositions = kalshiConnected
-      ? kalshiPositions.filter((position) => toFiniteNumber(position.size) > 0)
-      : []
-    const exposure = visibleKalshiPositions.reduce(
-      (sum, pos) => sum + toFiniteNumber(pos.size) * toFiniteNumber(pos.current_price),
-      0
-    )
-    const unrealizedPnl = visibleKalshiPositions.reduce((sum, pos) => sum + toFiniteNumber(pos.unrealized_pnl), 0)
+    const readiness = kalshiPortfolio?.readiness ?? 'never_synchronized'
+    const queryFailed = Boolean(kalshiPortfolioError)
+    const positionCount = (kalshiPortfolio?.positions?.market_positions.length ?? 0)
+      + (kalshiPortfolio?.positions?.event_positions.length ?? 0)
     return {
       id: 'kalshi',
       label: 'Kalshi',
-      connected: kalshiConnected,
-      accountLabel: kalshiStatus?.email || (kalshiStatus?.member_id ? t('accounts.memberPrefix', { id: kalshiStatus.member_id }) : t('accounts.noAccount')),
-      balance: kalshiConnected ? toFiniteNumber(kalshiBalance?.balance ?? kalshiStatus?.balance?.balance) : 0,
-      available: kalshiConnected ? toFiniteNumber(kalshiBalance?.available ?? kalshiStatus?.balance?.available) : 0,
-      exposure,
-      openPositions: visibleKalshiPositions.length,
-      unrealizedPnl,
+      connected: readiness === 'healthy' && !queryFailed,
+      accountLabel: kalshiPortfolio?.principal_fingerprint
+        ? `${queryFailed ? 'cached · query failed' : readiness.replace(/_/g, ' ')} · ${kalshiPortfolio.principal_fingerprint.slice(0, 8)}…`
+        : (queryFailed ? 'query failed' : readiness.replace(/_/g, ' ')),
+      balance: 0,
+      available: 0,
+      exposure: 0,
+      openPositions: positionCount,
+      unrealizedPnl: 0,
     }
-  }, [kalshiStatus, kalshiBalance?.balance, kalshiBalance?.available, kalshiPositions])
+  }, [kalshiPortfolio, kalshiPortfolioError])
 
-  const venueSnapshots = useMemo(() => [polymarketSnapshot, kalshiSnapshot], [polymarketSnapshot, kalshiSnapshot])
+  // Only homogeneous legacy snapshots participate in cross-venue arithmetic.
+  // Exact Kalshi fixed-point evidence is rendered separately and never coerced
+  // into Number or mislabeled as a connected live account.
+  const venueSnapshots = useMemo(() => [polymarketSnapshot], [polymarketSnapshot])
+  const liveVenueChoices = useMemo(() => [polymarketSnapshot, kalshiSnapshot], [polymarketSnapshot, kalshiSnapshot])
 
   const liveMetrics = useMemo(() => {
     const totalBalance = venueSnapshots.reduce((sum, venue) => sum + venue.balance, 0)
@@ -542,32 +538,8 @@ export default function AccountsPanel({ onOpenSettings }: AccountsPanelProps) {
       }
     })
 
-    const kalshiRows = (kalshiStatus?.authenticated ? kalshiPositions : [])
-      .filter((position) => toFiniteNumber(position.size) > 0)
-      .map((position) => {
-      const size = toFiniteNumber(position.size)
-      const markPrice = toFiniteNumber(position.current_price)
-      const entryPrice = toFiniteNumber(position.average_cost)
-      const marketValue = size * markPrice
-      const costBasis = size * entryPrice
-      const unrealizedPnl = toFiniteNumber(position.unrealized_pnl) || (marketValue - costBasis)
-      return {
-        id: `kalshi:${position.token_id}:${position.market_id}`,
-        venue: 'Kalshi' as const,
-        marketQuestion: String(position.market_question || '').trim() || position.market_id,
-        marketId: String(position.market_id || '').trim(),
-        outcome: normalizeDirection(position.outcome),
-        size,
-        entryPrice,
-        markPrice,
-        costBasis,
-        marketValue,
-        unrealizedPnl,
-      }
-    })
-
-    return [...polymarketRows, ...kalshiRows].sort((left, right) => Math.abs(right.marketValue) - Math.abs(left.marketValue))
-  }, [polymarketReady, tradingPositions, kalshiStatus?.authenticated, kalshiPositions])
+    return polymarketRows.sort((left, right) => Math.abs(right.marketValue) - Math.abs(left.marketValue))
+  }, [polymarketReady, tradingPositions])
 
   const liveOrderRows = useMemo(() => {
     return [...liveOrders].sort(
@@ -891,7 +863,7 @@ export default function AccountsPanel({ onOpenSettings }: AccountsPanelProps) {
                   <p className="text-[10px] uppercase tracking-[0.12em] text-muted-foreground/70">{t('accounts.liveVenues')}</p>
                   <p className="text-xs text-muted-foreground">{t('accounts.liveVenuesDesc')}</p>
                 </div>
-                {venueSnapshots.map((venue) => (
+                {liveVenueChoices.map((venue) => (
                   <div key={venue.id} className="rounded-lg border border-border/70 bg-background/40 p-2.5">
                     <div className="mb-1.5 flex items-start justify-between gap-2">
                       <div>
@@ -908,19 +880,30 @@ export default function AccountsPanel({ onOpenSettings }: AccountsPanelProps) {
                           venue.connected ? 'bg-green-500/20 text-green-300' : 'bg-amber-500/20 text-amber-300'
                         )}
                       >
-                        {venue.connected ? t('accounts.connected') : t('accounts.disconnected')}
+                        {venue.id === 'kalshi'
+                          ? (kalshiPortfolioError ? 'cached · query failed' : (kalshiPortfolio?.readiness ?? 'unavailable').replace(/_/g, ' '))
+                          : (venue.connected ? t('accounts.connected') : t('accounts.disconnected'))}
                       </Badge>
                     </div>
-                    <div className="grid grid-cols-2 gap-2 text-[11px]">
-                      <MetricPair label={t('accounts.balance')} value={formatUsd(venue.balance)} />
-                      <MetricPair label={t('accounts.available')} value={formatUsd(venue.available)} />
-                      <MetricPair label={t('accounts.exposure')} value={formatUsd(venue.exposure)} />
-                      <MetricPair
-                        label={t('accounts.unrealized')}
-                        value={formatSignedUsd(venue.unrealizedPnl)}
-                        valueClass={venue.unrealizedPnl >= 0 ? 'text-green-300' : 'text-red-300'}
-                      />
-                    </div>
+                    {venue.id === 'kalshi' ? (
+                      <div className="grid grid-cols-2 gap-2 text-[11px]">
+                        <MetricPair label="Evidence" value={kalshiPortfolio?.projection_id ? 'Last healthy available' : 'Unavailable'} />
+                        <MetricPair label="As of" value={kalshiPortfolio?.last_healthy_as_of ? new Date(kalshiPortfolio.last_healthy_as_of).toLocaleString() : '—'} />
+                        <MetricPair label="Orders / fills" value={`${kalshiPortfolio?.orders.length ?? 0} / ${kalshiPortfolio?.fills.length ?? 0}`} />
+                        <MetricPair label="Gaps" value={kalshiPortfolio?.gaps.join(', ') || 'None reported'} />
+                      </div>
+                    ) : (
+                      <div className="grid grid-cols-2 gap-2 text-[11px]">
+                        <MetricPair label={t('accounts.balance')} value={formatUsd(venue.balance)} />
+                        <MetricPair label={t('accounts.available')} value={formatUsd(venue.available)} />
+                        <MetricPair label={t('accounts.exposure')} value={formatUsd(venue.exposure)} />
+                        <MetricPair
+                          label={t('accounts.unrealized')}
+                          value={formatSignedUsd(venue.unrealizedPnl)}
+                          valueClass={venue.unrealizedPnl >= 0 ? 'text-green-300' : 'text-red-300'}
+                        />
+                      </div>
+                    )}
                     <div className="mt-1.5 flex items-center justify-between text-[11px] text-muted-foreground">
                       <span>{t('accounts.openPositionsCount', { n: venue.openPositions })}</span>
                       <Button
@@ -1335,7 +1318,7 @@ export default function AccountsPanel({ onOpenSettings }: AccountsPanelProps) {
             </div>
             <ScrollArea className="flex-1 min-h-0">
               <div className="space-y-1.5 p-1.5">
-                {venueSnapshots.map((venue) => {
+                {liveVenueChoices.map((venue) => {
                   const isActive = selectedAccountId === `live:${venue.id}` || (!selectedAccountId?.startsWith('live:') && venue.id === 'polymarket')
                   return (
                     <button
@@ -1357,12 +1340,25 @@ export default function AccountsPanel({ onOpenSettings }: AccountsPanelProps) {
                         <span className={cn('h-1.5 w-1.5 rounded-full', venue.connected ? 'bg-emerald-400' : 'bg-amber-400')} />
                       </div>
                       <p className="mt-0.5 text-[9px] text-muted-foreground">{venue.accountLabel}</p>
-                      <p className="text-[9px] text-muted-foreground">
-                        {t('accounts.cashPositionsLine', { value: formatUsd(venue.balance), n: venue.openPositions })}
-                      </p>
-                      <p className={cn('text-[9px] font-mono', venue.unrealizedPnl >= 0 ? 'text-emerald-400' : 'text-red-400')}>
-                        {formatSignedUsd(venue.unrealizedPnl)}
-                      </p>
+                      {venue.id === 'kalshi' ? (
+                        <>
+                          <p className="text-[9px] text-muted-foreground">Read-only durable evidence</p>
+                          <p className="text-[9px] font-mono text-muted-foreground">
+                            {kalshiPortfolio?.last_healthy_as_of
+                              ? new Date(kalshiPortfolio.last_healthy_as_of).toLocaleString()
+                              : 'No healthy projection'}
+                          </p>
+                        </>
+                      ) : (
+                        <>
+                          <p className="text-[9px] text-muted-foreground">
+                            {t('accounts.cashPositionsLine', { value: formatUsd(venue.balance), n: venue.openPositions })}
+                          </p>
+                          <p className={cn('text-[9px] font-mono', venue.unrealizedPnl >= 0 ? 'text-emerald-400' : 'text-red-400')}>
+                            {formatSignedUsd(venue.unrealizedPnl)}
+                          </p>
+                        </>
+                      )}
                     </button>
                   )
                 })}
@@ -1371,6 +1367,19 @@ export default function AccountsPanel({ onOpenSettings }: AccountsPanelProps) {
           </div>
 
           <div className="min-h-0 flex flex-col gap-2">
+            {activeLiveVenue === 'kalshi' ? (
+              <KalshiAuthoritativePortfolio
+                snapshot={kalshiPortfolio}
+                isLoading={kalshiPortfolioLoading}
+                error={kalshiPortfolioError}
+                isFetching={kalshiPortfolioFetching}
+                onRefresh={() => { void refetchKalshiPortfolio() }}
+                principalChoices={kalshiPrincipalChoices}
+                selectedPrincipal={kalshiPrincipal}
+                onSelectPrincipal={setKalshiPrincipal}
+              />
+            ) : (
+              <>
             <div className="grid gap-1.5 sm:grid-cols-2 xl:grid-cols-4">
               <div className="rounded-md border border-emerald-500/25 bg-emerald-500/10 px-2.5 py-1.5">
                 <p className="text-[10px] uppercase tracking-wider text-muted-foreground">{t('accounts.activeVenue')}</p>
@@ -1661,6 +1670,8 @@ export default function AccountsPanel({ onOpenSettings }: AccountsPanelProps) {
                   </table>
                 </ScrollArea>
               </div>
+            )}
+              </>
             )}
           </div>
         </div>

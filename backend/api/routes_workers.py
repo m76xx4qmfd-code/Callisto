@@ -30,6 +30,7 @@ from services.trader_orchestrator_state import (
 )
 from services.weather import shared_state as weather_shared_state
 from services.worker_state import (
+    DEFAULT_DISABLED_WORKERS,
     clear_worker_run_request,
     list_worker_snapshots,
     request_worker_run,
@@ -53,6 +54,7 @@ ALLOWED_WORKERS = {
     "redeemer",
     "discovery",
     "events",
+    "kalshi_portfolio_sync",
 }
 WORKER_DISPLAY_ORDER = (
     "scanner",
@@ -66,8 +68,9 @@ WORKER_DISPLAY_ORDER = (
     "trader_reconciliation",
     "redeemer",
     "events",
+    "kalshi_portfolio_sync",
 )
-GENERIC_WORKERS = ("scanner_slo", "crypto", "tracked_traders", "trader_reconciliation", "redeemer", "events")
+GENERIC_WORKERS = ("scanner_slo", "crypto", "tracked_traders", "trader_reconciliation", "redeemer", "events", "kalshi_portfolio_sync")
 DB_RETRY_ATTEMPTS = 3
 DB_RETRY_BASE_DELAY_SECONDS = 0.2
 DB_RETRY_MAX_DELAY_SECONDS = 1.5
@@ -228,10 +231,11 @@ async def _collect_workers(session: AsyncSession) -> list[dict]:
         elif worker_name == "trader_orchestrator":
             snapshot["control"] = orchestrator_control
         else:
+            default_enabled = worker_name not in DEFAULT_DISABLED_WORKERS
             snapshot["control"] = generic_controls.get(
                 worker_name,
                 {
-                    "is_enabled": True,
+                    "is_enabled": default_enabled,
                     "is_paused": False,
                     "interval_seconds": 60,
                     "requested_run_at": None,
@@ -267,12 +271,13 @@ async def _refresh_workers_status_payload() -> dict:
 def _workers_status_fallback_payload() -> dict:
     workers = []
     for worker_name in WORKER_DISPLAY_ORDER:
+        default_enabled = worker_name not in DEFAULT_DISABLED_WORKERS
         workers.append(
             summarize_worker_snapshot(
                 {
                     "worker_name": worker_name,
                     "running": False,
-                    "enabled": True,
+                    "enabled": default_enabled,
                     "current_activity": "Waiting for DB telemetry",
                     "interval_seconds": None,
                     "last_run_at": None,
@@ -281,7 +286,7 @@ def _workers_status_fallback_payload() -> dict:
                     "updated_at": None,
                     "stats": {},
                     "control": {
-                        "is_enabled": True,
+                        "is_enabled": default_enabled,
                         "is_paused": False,
                         "interval_seconds": 60,
                         "requested_run_at": None,
@@ -310,9 +315,14 @@ async def _set_all_workers_paused(session: AsyncSession, paused: bool) -> None:
         await discovery_shared_state.clear_discovery_run_request(session)
 
     for worker_name in GENERIC_WORKERS:
-        await set_worker_paused(session, worker_name, paused)
+        default_enabled = worker_name not in DEFAULT_DISABLED_WORKERS
+        await set_worker_paused(
+            session, worker_name, paused, default_enabled=default_enabled
+        )
         if paused:
-            await clear_worker_run_request(session, worker_name)
+            await clear_worker_run_request(
+                session, worker_name, default_enabled=default_enabled
+            )
 
     if paused:
         global_pause_state.pause()
@@ -430,7 +440,12 @@ async def start_worker(worker: str, session: AsyncSession = Depends(get_db_sessi
             interval_seconds=int(control.get("run_interval_seconds") or ORCHESTRATOR_DEFAULT_RUN_INTERVAL_SECONDS),
         )
     else:
-        await set_worker_paused(session, name, False)
+        await set_worker_paused(
+            session,
+            name,
+            False,
+            default_enabled=name not in DEFAULT_DISABLED_WORKERS,
+        )
 
     return {"status": "started", "worker": await _worker_detail(session, name)}
 
@@ -458,7 +473,12 @@ async def pause_worker(worker: str, session: AsyncSession = Depends(get_db_sessi
             interval_seconds=int(control.get("run_interval_seconds") or ORCHESTRATOR_DEFAULT_RUN_INTERVAL_SECONDS),
         )
     else:
-        await set_worker_paused(session, name, True)
+        await set_worker_paused(
+            session,
+            name,
+            True,
+            default_enabled=name not in DEFAULT_DISABLED_WORKERS,
+        )
 
     return {"status": "paused", "worker": await _worker_detail(session, name)}
 
@@ -519,6 +539,15 @@ async def run_worker_once(worker: str, session: AsyncSession = Depends(get_db_se
     name = _normalize_worker_name(worker)
     _assert_supported_worker(name)
 
+    # A scheduling hint cannot bypass the persistent operator master switch.
+    detail = await _worker_detail(session, name)
+    control = detail.get("control") if isinstance(detail, dict) else None
+    if isinstance(control, dict) and not bool(control.get("is_enabled", True)):
+        raise HTTPException(
+            status_code=409,
+            detail=f"Worker '{name}' is disabled. Enable it before queueing a run.",
+        )
+
     if name == "scanner":
         await shared_state.request_one_scan(session)
     elif name == "news":
@@ -530,7 +559,11 @@ async def run_worker_once(worker: str, session: AsyncSession = Depends(get_db_se
     elif name == "trader_orchestrator":
         await update_orchestrator_control(session, requested_run_at=utcnow())
     else:
-        await request_worker_run(session, name)
+        await request_worker_run(
+            session,
+            name,
+            default_enabled=name not in DEFAULT_DISABLED_WORKERS,
+        )
 
     return {"status": "queued", "worker": await _worker_detail(session, name)}
 
@@ -555,6 +588,11 @@ async def set_worker_run_interval(
     elif name == "trader_orchestrator":
         await update_orchestrator_control(session, run_interval_seconds=interval_seconds)
     else:
-        await set_worker_interval(session, name, interval_seconds)
+        await set_worker_interval(
+            session,
+            name,
+            interval_seconds,
+            default_enabled=name not in DEFAULT_DISABLED_WORKERS,
+        )
 
     return {"status": "updated", "worker": await _worker_detail(session, name)}
