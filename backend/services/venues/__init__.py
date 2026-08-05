@@ -27,6 +27,20 @@ from .kalshi_v2 import (
     KalshiV2Client,
     LiveTradingNotArmedError,
     event_order_from_intent,
+    kalshi_principal_fingerprint,
+)
+from .kalshi_v2_private_sync import (
+    KalshiPrivatePrincipalMismatchError,
+    KalshiPrivateSynchronizationEvidence,
+    KalshiPrivateSyncRunner,
+)
+from .kalshi_v2_private_ws import (
+    KalshiPrivateFill,
+    KalshiPrivateMarketPosition,
+    KalshiPrivateOrder,
+    KalshiPrivateWSFrame,
+    KalshiPrivateWSLifecycle,
+    KalshiPrivateWSProtocolError,
 )
 from .kalshi_v2_ws import (
     KalshiOrderbookDelta,
@@ -60,6 +74,11 @@ from .kalshi_v2_ws_session import (
     KalshiWSSessionRecoveryRequested,
     KalshiWSSessionTerminated,
 )
+from .kalshi_v2_ws_transport import (
+    KalshiWebsocketsTransport,
+    KalshiWebsocketsTransportFactory,
+    KalshiWSTransportProtocolError,
+)
 
 __all__ = [
     "KALSHI_API_PREFIX",
@@ -84,6 +103,15 @@ __all__ = [
     "KalshiOrderbookView",
     "KalshiOrdersPage",
     "KalshiPositionsPage",
+    "KalshiPrivateFill",
+    "KalshiPrivateMarketPosition",
+    "KalshiPrivateOrder",
+    "KalshiPrivatePrincipalMismatchError",
+    "KalshiPrivateSyncRunner",
+    "KalshiPrivateSynchronizationEvidence",
+    "KalshiPrivateWSFrame",
+    "KalshiPrivateWSLifecycle",
+    "KalshiPrivateWSProtocolError",
     "KalshiProtocolError",
     "KalshiRequestSigner",
     "KalshiSettlement",
@@ -109,7 +137,11 @@ __all__ = [
     "KalshiWSSessionTerminated",
     "KalshiWSSubscribed",
     "KalshiWSSubscriptionCommand",
+    "KalshiWSTransportProtocolError",
+    "KalshiWebsocketsTransport",
+    "KalshiWebsocketsTransportFactory",
     "LiveTradingNotArmedError",
     "VenueOrderIntent",
     "event_order_from_intent",
+    "kalshi_principal_fingerprint",
 ]

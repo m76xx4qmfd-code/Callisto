@@ -30,6 +30,8 @@ KALSHI_API_PREFIX = "/trade-api/v2"
 KALSHI_WS_PATH = "/trade-api/ws/v2"
 KALSHI_PRODUCTION_ORIGIN = "https://external-api.kalshi.com"
 KALSHI_DEMO_ORIGIN = "https://external-api.demo.kalshi.co"
+KALSHI_PRODUCTION_WS_URL = f"wss://external-api-ws.kalshi.com{KALSHI_WS_PATH}"
+KALSHI_DEMO_WS_URL = f"wss://external-api-ws.demo.kalshi.co{KALSHI_WS_PATH}"
 _KALSHI_APPROVED_ORIGINS = frozenset(
     {
         KALSHI_PRODUCTION_ORIGIN,
@@ -38,6 +40,12 @@ _KALSHI_APPROVED_ORIGINS = frozenset(
         "https://demo-api.kalshi.co",
     }
 )
+_KALSHI_WS_URL_BY_ORIGIN = {
+    KALSHI_PRODUCTION_ORIGIN: KALSHI_PRODUCTION_WS_URL,
+    "https://api.elections.kalshi.com": KALSHI_PRODUCTION_WS_URL,
+    KALSHI_DEMO_ORIGIN: KALSHI_DEMO_WS_URL,
+    "https://demo-api.kalshi.co": KALSHI_DEMO_WS_URL,
+}
 _EVENT_ORDERS_PATH = f"{KALSHI_API_PREFIX}/portfolio/events/orders"
 _BALANCE_PATH = f"{KALSHI_API_PREFIX}/portfolio/balance"
 _ORDERS_PATH = f"{KALSHI_API_PREFIX}/portfolio/orders"
@@ -857,6 +865,28 @@ def event_order_from_intent(
     )
 
 
+def kalshi_principal_fingerprint(*, origin: str, key_id: str) -> str:
+    """Return the non-secret authenticated-principal identity shared by REST and WebSocket runtimes."""
+
+    normalized_origin = origin.strip().rstrip("/")
+    if normalized_origin not in _KALSHI_APPROVED_ORIGINS:
+        raise KalshiProtocolError("principal fingerprint requires an approved Kalshi origin")
+    normalized_key_id = key_id.strip()
+    if not normalized_key_id:
+        raise KalshiProtocolError("Kalshi key_id is required")
+    origin_bytes = normalized_origin.encode()
+    material = str(len(origin_bytes)).encode() + b":" + origin_bytes + normalized_key_id.encode()
+    return hashlib.sha256(material).hexdigest()
+
+
+def kalshi_websocket_url_for_origin(*, origin: str) -> str:
+    normalized_origin = origin.strip().rstrip("/")
+    try:
+        return _KALSHI_WS_URL_BY_ORIGIN[normalized_origin]
+    except KeyError as exc:
+        raise KalshiProtocolError("WebSocket credentials require an approved Kalshi origin") from exc
+
+
 class KalshiRequestSigner:
     """RSA-PSS/SHA-256 signer for current Kalshi authenticated requests."""
 
@@ -897,6 +927,9 @@ class KalshiRequestSigner:
             "KALSHI-ACCESS-SIGNATURE": base64.b64encode(signature).decode("ascii"),
         }
 
+    def principal_fingerprint(self, *, origin: str) -> str:
+        return kalshi_principal_fingerprint(origin=origin, key_id=self.key_id)
+
 
 class KalshiV2Client:
     """Authenticated V2 portfolio reads and event orders with fail-closed writes.
@@ -924,9 +957,7 @@ class KalshiV2Client:
             raise KalshiProtocolError("credentials may only be sent to an approved Kalshi origin")
         self._origin = origin
         self._signer = KalshiRequestSigner(key_id=key_id, private_key_pem=private_key_pem)
-        origin_bytes = origin.encode()
-        fingerprint_material = str(len(origin_bytes)).encode() + b":" + origin_bytes + self._signer.key_id.encode()
-        self._principal_fingerprint = hashlib.sha256(fingerprint_material).hexdigest()
+        self._principal_fingerprint = self._signer.principal_fingerprint(origin=origin)
         self._http = http_client or httpx.AsyncClient(timeout=30.0)
         self._owns_http = http_client is None
         self._allow_writes = allow_writes
