@@ -384,3 +384,52 @@ def test_cancelling_blocked_synchronization_cancels_owned_operation() -> None:
         assert transport.closed is True
 
     asyncio.run(scenario())
+
+
+def test_cancelling_during_transport_close_waits_for_close_before_propagating() -> None:
+    class SlowCloseTransport(FakeTransport):
+        def __init__(self) -> None:
+            super().__init__()
+            self.close_started = asyncio.Event()
+            self.release_close = asyncio.Event()
+            self.close_cancelled = False
+
+        async def close(self) -> None:
+            self.close_started.set()
+            try:
+                await self.release_close.wait()
+            except asyncio.CancelledError:
+                self.close_cancelled = True
+                raise
+            self.closed = True
+
+    async def scenario() -> None:
+        transport = SlowCloseTransport()
+        lifecycle = _lifecycle()
+        synchronizer = FakeSynchronizer(lifecycle.principal_fingerprint)
+        runner = KalshiPrivateSyncRunner(
+            lifecycle=lifecycle,
+            transport_factory=FakeFactory([transport]),
+            synchronizer=synchronizer,
+            acknowledgement_timeout_seconds=1,
+            initial_backoff_seconds=1,
+            maximum_backoff_seconds=1,
+        )
+        task = asyncio.create_task(runner.run())
+        await _ack_all(transport)
+        assert await synchronizer.started.get() == 1
+        while not runner.ready:
+            await asyncio.sleep(0)
+        await transport.frames.put({"type": "unknown"})
+        await asyncio.wait_for(transport.close_started.wait(), timeout=1)
+
+        task.cancel()
+        await asyncio.sleep(0)
+        assert task.done() is False
+        transport.release_close.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert transport.closed is True
+        assert transport.close_cancelled is False
+
+    asyncio.run(scenario())

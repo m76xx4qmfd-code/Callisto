@@ -8,7 +8,7 @@ import pytest
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 
-from services.venues.kalshi_v2 import KALSHI_PRODUCTION_ORIGIN, KalshiRequestSigner
+from services.venues.kalshi_v2 import KALSHI_DEMO_ORIGIN, KALSHI_PRODUCTION_ORIGIN, KalshiRequestSigner
 from services.venues.kalshi_v2_private_ws import (
     KalshiPrivateFill,
     KalshiPrivateMarketPosition,
@@ -218,3 +218,11 @@ def test_private_lifecycle_rejects_duplicate_wrong_ack_stale_epoch_unknown_and_p
     with pytest.raises(KalshiPrivateWSProtocolError):
         lifecycle.receive(second.epoch_id, {"type": "market_position", "sid": 23, "msg": other})
     assert lifecycle.current_epoch_id is None
+
+
+def test_private_lifecycle_binds_demo_principal_to_demo_websocket_host() -> None:
+    lifecycle = KalshiPrivateWSLifecycle(signer=_signer(), principal_origin=KALSHI_DEMO_ORIGIN)
+
+    instructions = lifecycle.begin_connection(timestamp_ms=1_785_873_600_000)
+
+    assert instructions.url == "wss://external-api-ws.demo.kalshi.co/trade-api/ws/v2"

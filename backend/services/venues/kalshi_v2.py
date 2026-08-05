@@ -30,6 +30,8 @@ KALSHI_API_PREFIX = "/trade-api/v2"
 KALSHI_WS_PATH = "/trade-api/ws/v2"
 KALSHI_PRODUCTION_ORIGIN = "https://external-api.kalshi.com"
 KALSHI_DEMO_ORIGIN = "https://external-api.demo.kalshi.co"
+KALSHI_PRODUCTION_WS_URL = f"wss://external-api-ws.kalshi.com{KALSHI_WS_PATH}"
+KALSHI_DEMO_WS_URL = f"wss://external-api-ws.demo.kalshi.co{KALSHI_WS_PATH}"
 _KALSHI_APPROVED_ORIGINS = frozenset(
     {
         KALSHI_PRODUCTION_ORIGIN,
@@ -38,6 +40,12 @@ _KALSHI_APPROVED_ORIGINS = frozenset(
         "https://demo-api.kalshi.co",
     }
 )
+_KALSHI_WS_URL_BY_ORIGIN = {
+    KALSHI_PRODUCTION_ORIGIN: KALSHI_PRODUCTION_WS_URL,
+    "https://api.elections.kalshi.com": KALSHI_PRODUCTION_WS_URL,
+    KALSHI_DEMO_ORIGIN: KALSHI_DEMO_WS_URL,
+    "https://demo-api.kalshi.co": KALSHI_DEMO_WS_URL,
+}
 _EVENT_ORDERS_PATH = f"{KALSHI_API_PREFIX}/portfolio/events/orders"
 _BALANCE_PATH = f"{KALSHI_API_PREFIX}/portfolio/balance"
 _ORDERS_PATH = f"{KALSHI_API_PREFIX}/portfolio/orders"
@@ -869,6 +877,14 @@ def kalshi_principal_fingerprint(*, origin: str, key_id: str) -> str:
     origin_bytes = normalized_origin.encode()
     material = str(len(origin_bytes)).encode() + b":" + origin_bytes + normalized_key_id.encode()
     return hashlib.sha256(material).hexdigest()
+
+
+def kalshi_websocket_url_for_origin(*, origin: str) -> str:
+    normalized_origin = origin.strip().rstrip("/")
+    try:
+        return _KALSHI_WS_URL_BY_ORIGIN[normalized_origin]
+    except KeyError as exc:
+        raise KalshiProtocolError("WebSocket credentials require an approved Kalshi origin") from exc
 
 
 class KalshiRequestSigner:

@@ -142,3 +142,32 @@ def test_factory_rejects_hostile_url_before_credentials_reach_connect() -> None:
         assert calls == 0
 
     asyncio.run(scenario())
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"cmd": "subscribe", "params": {"channels": ["fill"]}},
+        {"id": 0, "cmd": "subscribe", "params": {"channels": ["fill"]}},
+        {"id": True, "cmd": "subscribe", "params": {"channels": ["fill"]}},
+        {
+            "id": 1,
+            "cmd": "subscribe",
+            "params": {"channels": ["fill"]},
+            "unexpected": "field",
+        },
+    ],
+)
+def test_transport_rejects_noncanonical_subscribe_commands(payload: dict[str, object]) -> None:
+    async def scenario() -> None:
+        socket = FakeSocket([])
+
+        async def connect(url: str, **kwargs: object) -> FakeSocket:
+            return socket
+
+        transport = await KalshiWebsocketsTransportFactory(connect=connect).connect(_instructions())
+        with pytest.raises(KalshiWSTransportProtocolError):
+            await transport.send(payload)
+        assert socket.sent == []
+
+    asyncio.run(scenario())

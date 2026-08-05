@@ -9,9 +9,11 @@ from typing import Protocol
 
 import websockets
 
-from services.venues.kalshi_v2_ws_lifecycle import KALSHI_V2_WS_URL, KalshiWSConnectionInstructions
+from services.venues.kalshi_v2 import KALSHI_DEMO_WS_URL, KALSHI_PRODUCTION_WS_URL
+from services.venues.kalshi_v2_ws_lifecycle import KalshiWSConnectionInstructions
 
 _ALLOWED_PRIVATE_CHANNELS = frozenset({"user_orders", "fill", "market_positions"})
+_ALLOWED_WS_URLS = frozenset({KALSHI_PRODUCTION_WS_URL, KALSHI_DEMO_WS_URL})
 _SILENT_WEBSOCKETS_LOGGER = logging.getLogger("callisto.kalshi.private_ws")
 _SILENT_WEBSOCKETS_LOGGER.setLevel(logging.CRITICAL + 1)
 _SILENT_WEBSOCKETS_LOGGER.disabled = True
@@ -55,6 +57,11 @@ class KalshiWebsocketsTransport:
         return payload
 
     async def send(self, payload: dict[str, object]) -> None:
+        if set(payload) != {"id", "cmd", "params"}:
+            raise KalshiWSTransportProtocolError("subscribe command must contain exactly id, cmd, and params")
+        command_id = payload.get("id")
+        if isinstance(command_id, bool) or not isinstance(command_id, int) or command_id <= 0:
+            raise KalshiWSTransportProtocolError("subscribe command id must be a positive integer")
         if payload.get("cmd") != "subscribe":
             raise KalshiWSTransportProtocolError("only subscribe commands are permitted")
         params = payload.get("params")
@@ -111,7 +118,7 @@ class KalshiWebsocketsTransportFactory:
         self._max_size = max_size
 
     async def connect(self, instructions: KalshiWSConnectionInstructions) -> KalshiWebsocketsTransport:
-        if instructions.url != KALSHI_V2_WS_URL:
+        if instructions.url not in _ALLOWED_WS_URLS:
             raise KalshiWSTransportProtocolError("credentials may only be sent to the approved Kalshi WebSocket URL")
         socket = await self._connect(
             instructions.url,

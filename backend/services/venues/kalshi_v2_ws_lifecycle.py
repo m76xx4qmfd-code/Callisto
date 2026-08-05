@@ -9,7 +9,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass
 
-from services.venues.kalshi_v2 import KALSHI_WS_PATH, KalshiRequestSigner
+from services.venues.kalshi_v2 import KALSHI_PRODUCTION_WS_URL, KALSHI_WS_PATH, KalshiRequestSigner
 from services.venues.kalshi_v2_ws import (
     KalshiOrderbookDelta,
     KalshiOrderbookSnapshot,
@@ -20,7 +20,7 @@ from services.venues.kalshi_v2_ws import (
 )
 
 KALSHI_V2_WS_PATH = KALSHI_WS_PATH
-KALSHI_V2_WS_URL = f"wss://external-api-ws.kalshi.com{KALSHI_V2_WS_PATH}"
+KALSHI_V2_WS_URL = KALSHI_PRODUCTION_WS_URL
 _PRIVATE_COVERAGE_REASON = "authoritative_portfolio_reconciliation_not_implemented"
 _CHANNELS = ("orderbook_delta", "user_orders", "fill")
 

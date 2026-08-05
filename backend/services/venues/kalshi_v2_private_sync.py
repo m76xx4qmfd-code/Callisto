@@ -192,8 +192,7 @@ class KalshiPrivateSyncRunner:
                 if epoch_id is not None:
                     self._lifecycle.disconnect(epoch_id, self._terminal_reason or "disconnected")
                 if transport is not None:
-                    with suppress(Exception):
-                        await transport.close()
+                    await self._close_transport(transport)
                 self._connected = False
                 self._acknowledged = False
                 self._ready_flag = False
@@ -297,6 +296,18 @@ class KalshiPrivateSyncRunner:
     async def _raise_reader(reader: asyncio.Task[None]) -> None:
         await reader
         raise _GenerationEnded("private reader ended unexpectedly")
+
+    @staticmethod
+    async def _close_transport(transport: KalshiPrivateTransport) -> None:
+        close_task = asyncio.create_task(transport.close())
+        try:
+            await asyncio.shield(close_task)
+        except asyncio.CancelledError:
+            with suppress(Exception):
+                await close_task
+            raise
+        except Exception:  # noqa: BLE001 - transport close failures cannot prevent fail-closed teardown.
+            return
 
     def _retract(self, reason: str) -> None:
         self._ready_flag = False

@@ -14,9 +14,8 @@ from decimal import Decimal, InvalidOperation
 from typing import Literal, TypeAlias, cast
 from uuid import UUID
 
-from services.venues.kalshi_v2 import KALSHI_WS_PATH, KalshiRequestSigner
+from services.venues.kalshi_v2 import KALSHI_WS_PATH, KalshiRequestSigner, kalshi_websocket_url_for_origin
 from services.venues.kalshi_v2_ws_lifecycle import (
-    KALSHI_V2_WS_URL,
     KalshiWSConnectionInstructions,
     KalshiWSSubscriptionCommand,
 )
@@ -356,6 +355,7 @@ class KalshiPrivateWSLifecycle:
     def __init__(self, *, signer: KalshiRequestSigner, principal_origin: str) -> None:
         self._signer = signer
         self._principal_fingerprint = signer.principal_fingerprint(origin=principal_origin)
+        self._websocket_url = kalshi_websocket_url_for_origin(origin=principal_origin)
         self._epoch_counter = 0
         self._command_counter = 0
         self._last_timestamp_ms = 0
@@ -410,7 +410,7 @@ class KalshiPrivateWSLifecycle:
         return KalshiWSConnectionInstructions(
             epoch_id=self._epoch_counter,
             timestamp_ms=timestamp_ms,
-            url=KALSHI_V2_WS_URL,
+            url=self._websocket_url,
             headers=self._signer.headers(timestamp_ms=timestamp_ms, method="GET", path=KALSHI_WS_PATH),
             subscriptions=tuple(commands),
         )
