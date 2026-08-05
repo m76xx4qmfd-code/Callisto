@@ -69,7 +69,12 @@ def _to_decimal_compat(value: float) -> Decimal:
     return max(Decimal("0"), _to_decimal(value))
 
 
-def _make_service(*, available: float | None = 1000.0, min_balance: float = 0.0) -> LiveExecutionService:
+def _make_service(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    available: float | None = 1000.0,
+    min_balance: float = 0.0,
+) -> LiveExecutionService:
     """Build a service whose ``get_balance`` returns the configured
     snapshot.  No network, no SDK — every test runs in pure memory.
     """
@@ -82,9 +87,9 @@ def _make_service(*, available: float | None = 1000.0, min_balance: float = 0.0)
     # MAX_TRADE_SIZE_USD and friends; default values are fine for tests
     # but make MAX_TRADE_SIZE_USD generous so our $300 BUYs don't trip
     # the per-trade cap.
-    settings.MAX_TRADE_SIZE_USD = 10_000.0
-    settings.MIN_ORDER_SIZE_USD = 1.0
-    settings.MAX_DAILY_TRADE_VOLUME = 1_000_000.0
+    monkeypatch.setattr(settings, "MAX_TRADE_SIZE_USD", 10_000.0)
+    monkeypatch.setattr(settings, "MIN_ORDER_SIZE_USD", 1.0)
+    monkeypatch.setattr(settings, "MAX_DAILY_TRADE_VOLUME", 1_000_000.0)
 
     if available is None:
         async def _fake_balance(*, force_probe_all: bool = False) -> dict:
@@ -107,7 +112,7 @@ def _make_service(*, available: float | None = 1000.0, min_balance: float = 0.0)
     # Patch MIN_ACCOUNT_BALANCE_USD via the settings reference the
     # service holds.  Setattr on the settings object is the same hook
     # the broader test suite uses.
-    settings.MIN_ACCOUNT_BALANCE_USD = float(min_balance)
+    monkeypatch.setattr(settings, "MIN_ACCOUNT_BALANCE_USD", float(min_balance))
     return service
 
 
@@ -134,7 +139,7 @@ async def _drive_balance(service: LiveExecutionService, available: float | None)
 async def test_gate_bootstraps_keeper_on_first_call(monkeypatch):
     """First gate call seeds the keeper from a single chain read."""
     monkeypatch.setenv("HOMERUN_COLLATERAL_KEEPER_ENABLED", "1")
-    service = _make_service(available=500.0)
+    service = _make_service(monkeypatch, available=500.0)
 
     ok, err = await service._enforce_buy_pre_submit_gate(
         token_id="tok",
@@ -154,7 +159,7 @@ async def test_gate_falls_back_to_chain_when_bootstrap_fails(monkeypatch):
     don't block trading on a cold keeper.
     """
     monkeypatch.setenv("HOMERUN_COLLATERAL_KEEPER_ENABLED", "1")
-    service = _make_service(available=None)
+    service = _make_service(monkeypatch, available=None)
 
     ok, err = await service._enforce_buy_pre_submit_gate(
         token_id="tok",
@@ -175,7 +180,7 @@ async def test_gate_falls_back_to_chain_when_bootstrap_fails(monkeypatch):
 async def test_gate_steady_state_does_not_call_chain(monkeypatch):
     """After bootstrap, the gate is a pure-in-memory compare."""
     monkeypatch.setenv("HOMERUN_COLLATERAL_KEEPER_ENABLED", "1")
-    service = _make_service(available=500.0)
+    service = _make_service(monkeypatch, available=500.0)
 
     # First call bootstraps and may call get_balance.
     await service._enforce_buy_pre_submit_gate(token_id="tok", required_notional_usd=Decimal("10"))
@@ -202,7 +207,7 @@ async def test_gate_rejects_when_effective_below_required(monkeypatch):
     requested notional + MIN_ACCOUNT_BALANCE_USD.
     """
     monkeypatch.setenv("HOMERUN_COLLATERAL_KEEPER_ENABLED", "1")
-    service = _make_service(available=50.0, min_balance=10.0)
+    service = _make_service(monkeypatch, available=50.0, min_balance=10.0)
 
     ok, err = await service._enforce_buy_pre_submit_gate(
         token_id="tok",
@@ -224,7 +229,7 @@ async def test_concurrent_reservations_cannot_overdraw(monkeypatch):
     both succeed (atomic check-and-reserve under the keeper lock).
     """
     monkeypatch.setenv("HOMERUN_COLLATERAL_KEEPER_ENABLED", "1")
-    service = _make_service(available=1000.0)
+    service = _make_service(monkeypatch, available=1000.0)
     # Bootstrap first.
     async with service._get_keeper_lock():
         bootstrapped = await service._keeper_bootstrap_locked()
@@ -245,7 +250,7 @@ async def test_concurrent_reservations_cannot_overdraw(monkeypatch):
 @pytest.mark.asyncio
 async def test_reserve_then_release_restores_budget(monkeypatch):
     monkeypatch.setenv("HOMERUN_COLLATERAL_KEEPER_ENABLED", "1")
-    service = _make_service(available=1000.0)
+    service = _make_service(monkeypatch, available=1000.0)
     async with service._get_keeper_lock():
         await service._keeper_bootstrap_locked()
 
@@ -261,7 +266,7 @@ async def test_reserve_then_release_restores_budget(monkeypatch):
 async def test_release_is_idempotent_clamps_at_zero(monkeypatch):
     """Double-release must not drive reserved negative."""
     monkeypatch.setenv("HOMERUN_COLLATERAL_KEEPER_ENABLED", "1")
-    service = _make_service(available=1000.0)
+    service = _make_service(monkeypatch, available=1000.0)
     async with service._get_keeper_lock():
         await service._keeper_bootstrap_locked()
 
@@ -285,7 +290,7 @@ async def test_reconciler_settles_local_reservations_into_chain(monkeypatch):
     against it instead of double-counting.
     """
     monkeypatch.setenv("HOMERUN_COLLATERAL_KEEPER_ENABLED", "1")
-    service = _make_service(available=1000.0)
+    service = _make_service(monkeypatch, available=1000.0)
     async with service._get_keeper_lock():
         await service._keeper_bootstrap_locked()
 
@@ -319,7 +324,7 @@ async def test_reconciler_converges_down_without_halting(monkeypatch):
     — no halt, no operator intervention, no 16-hour outage.
     """
     monkeypatch.setenv("HOMERUN_COLLATERAL_KEEPER_ENABLED", "1")
-    service = _make_service(available=1000.0)
+    service = _make_service(monkeypatch, available=1000.0)
     async with service._get_keeper_lock():
         await service._keeper_bootstrap_locked()
 
@@ -354,7 +359,7 @@ async def test_reconciler_tracks_divergence_streak_for_observability(monkeypatch
     observability) even though it never halts.
     """
     monkeypatch.setenv("HOMERUN_COLLATERAL_KEEPER_ENABLED", "1")
-    service = _make_service(available=1000.0)
+    service = _make_service(monkeypatch, available=1000.0)
     async with service._get_keeper_lock():
         await service._keeper_bootstrap_locked()
 
@@ -378,7 +383,7 @@ async def test_reconciler_converges_up_without_halt(monkeypatch):
     reading.  Real causes: deposit, venue cancel refund, settlement.
     """
     monkeypatch.setenv("HOMERUN_COLLATERAL_KEEPER_ENABLED", "1")
-    service = _make_service(available=1000.0)
+    service = _make_service(monkeypatch, available=1000.0)
     async with service._get_keeper_lock():
         await service._keeper_bootstrap_locked()
 
@@ -405,7 +410,7 @@ async def test_reconciler_up_divergence_settles_pending_reservations(monkeypatch
     view) so we don't double-count.
     """
     monkeypatch.setenv("HOMERUN_COLLATERAL_KEEPER_ENABLED", "1")
-    service = _make_service(available=1000.0)
+    service = _make_service(monkeypatch, available=1000.0)
     async with service._get_keeper_lock():
         await service._keeper_bootstrap_locked()
 
@@ -429,7 +434,7 @@ async def test_tolerance_window_absorbs_small_drift(monkeypatch):
     the streak (covers normal slippage refunds on partial fills).
     """
     monkeypatch.setenv("HOMERUN_COLLATERAL_KEEPER_ENABLED", "1")
-    service = _make_service(available=1000.0)
+    service = _make_service(monkeypatch, available=1000.0)
     async with service._get_keeper_lock():
         await service._keeper_bootstrap_locked()
 
@@ -452,7 +457,7 @@ async def test_reconciler_never_auto_halts_under_sustained_divergence(monkeypatc
     authoritative ``submit_leg`` venue gate — never by a keeper halt.
     """
     monkeypatch.setenv("HOMERUN_COLLATERAL_KEEPER_ENABLED", "1")
-    service = _make_service(available=1000.0)
+    service = _make_service(monkeypatch, available=1000.0)
     async with service._get_keeper_lock():
         await service._keeper_bootstrap_locked()
 
@@ -475,7 +480,7 @@ async def test_clear_collateral_halt_is_safe_noop_when_not_halted(monkeypatch):
     nothing is halted — the reconciler no longer auto-halts.
     """
     monkeypatch.setenv("HOMERUN_COLLATERAL_KEEPER_ENABLED", "1")
-    service = _make_service(available=1000.0)
+    service = _make_service(monkeypatch, available=1000.0)
     async with service._get_keeper_lock():
         await service._keeper_bootstrap_locked()
 
@@ -497,7 +502,7 @@ async def test_stale_keeper_falls_back_to_legacy_chain_probe(monkeypatch):
     operational issues with the background loop.
     """
     monkeypatch.setenv("HOMERUN_COLLATERAL_KEEPER_ENABLED", "1")
-    service = _make_service(available=1000.0)
+    service = _make_service(monkeypatch, available=1000.0)
     # Bootstrap then artificially age the keeper.
     async with service._get_keeper_lock():
         await service._keeper_bootstrap_locked()
@@ -537,7 +542,7 @@ async def test_feature_flag_disabled_uses_legacy_gate(monkeypatch):
     monkeypatch.setenv("HOMERUN_COLLATERAL_KEEPER_ENABLED", "0")
     assert _keeper_enabled() is False
 
-    service = _make_service(available=1000.0)
+    service = _make_service(monkeypatch, available=1000.0)
     call_count = {"n": 0}
 
     async def _counted(*, force_probe_all: bool = False):
@@ -576,7 +581,7 @@ async def test_validate_and_reserve_order_claims_keeper_for_buy(monkeypatch):
     both bypass the gate via the post-gate race window.
     """
     monkeypatch.setenv("HOMERUN_COLLATERAL_KEEPER_ENABLED", "1")
-    service = _make_service(available=1000.0, min_balance=0.0)
+    service = _make_service(monkeypatch, available=1000.0, min_balance=0.0)
     async with service._get_keeper_lock():
         await service._keeper_bootstrap_locked()
 
@@ -598,7 +603,7 @@ async def test_release_reservation_releases_keeper_for_buy(monkeypatch):
     a chain reconcile.
     """
     monkeypatch.setenv("HOMERUN_COLLATERAL_KEEPER_ENABLED", "1")
-    service = _make_service(available=1000.0, min_balance=0.0)
+    service = _make_service(monkeypatch, available=1000.0, min_balance=0.0)
     async with service._get_keeper_lock():
         await service._keeper_bootstrap_locked()
 
@@ -630,7 +635,7 @@ async def test_sell_order_does_not_touch_keeper(monkeypatch):
     actually have collateral for.
     """
     monkeypatch.setenv("HOMERUN_COLLATERAL_KEEPER_ENABLED", "1")
-    service = _make_service(available=1000.0, min_balance=0.0)
+    service = _make_service(monkeypatch, available=1000.0, min_balance=0.0)
     async with service._get_keeper_lock():
         await service._keeper_bootstrap_locked()
 
@@ -653,8 +658,8 @@ async def test_gate_thin_headroom_rejects_when_fresh_chain_below_required(monkey
     """Near-full deployment: keeper reads stale-HIGH, but a fresh chain read
     shows the settled balance is below required -> reject (no doomed submit)."""
     monkeypatch.setenv("HOMERUN_COLLATERAL_KEEPER_ENABLED", "1")
-    settings.LIVE_BUY_GATE_THIN_HEADROOM_USD = 5.0
-    service = _make_service(available=12.0, min_balance=0.0)
+    monkeypatch.setattr(settings, "LIVE_BUY_GATE_THIN_HEADROOM_USD", 5.0)
+    service = _make_service(monkeypatch, available=12.0, min_balance=0.0)
     # First call bootstraps the keeper at chain_available=12.
     ok, _ = await service._enforce_buy_pre_submit_gate(token_id="tok", required_notional_usd=Decimal("10"))
     assert ok is True  # 12 >= 10 and fresh probe still 12
@@ -669,8 +674,8 @@ async def test_gate_thin_headroom_rejects_when_fresh_chain_below_required(monkey
 async def test_gate_thin_headroom_allows_when_fresh_chain_confirms(monkeypatch):
     """Thin headroom but the fresh chain read confirms >= required -> allow."""
     monkeypatch.setenv("HOMERUN_COLLATERAL_KEEPER_ENABLED", "1")
-    settings.LIVE_BUY_GATE_THIN_HEADROOM_USD = 5.0
-    service = _make_service(available=12.0, min_balance=0.0)
+    monkeypatch.setattr(settings, "LIVE_BUY_GATE_THIN_HEADROOM_USD", 5.0)
+    service = _make_service(monkeypatch, available=12.0, min_balance=0.0)
     await service._enforce_buy_pre_submit_gate(token_id="tok", required_notional_usd=Decimal("10"))
     ok, err = await service._enforce_buy_pre_submit_gate(token_id="tok", required_notional_usd=Decimal("10"))
     assert ok is True and err is None
@@ -681,8 +686,8 @@ async def test_gate_thin_headroom_does_not_block_on_probe_failure(monkeypatch):
     """If the fresh chain probe is unreachable at thin headroom, don't block —
     the venue-side gate at submit remains the backstop."""
     monkeypatch.setenv("HOMERUN_COLLATERAL_KEEPER_ENABLED", "1")
-    settings.LIVE_BUY_GATE_THIN_HEADROOM_USD = 5.0
-    service = _make_service(available=12.0, min_balance=0.0)
+    monkeypatch.setattr(settings, "LIVE_BUY_GATE_THIN_HEADROOM_USD", 5.0)
+    service = _make_service(monkeypatch, available=12.0, min_balance=0.0)
     await service._enforce_buy_pre_submit_gate(token_id="tok", required_notional_usd=Decimal("10"))
     await _drive_balance(service, None)  # fresh probe returns {"error": ...}
     ok, err = await service._enforce_buy_pre_submit_gate(token_id="tok", required_notional_usd=Decimal("10"))
@@ -693,8 +698,8 @@ async def test_gate_thin_headroom_does_not_block_on_probe_failure(monkeypatch):
 async def test_gate_comfortable_headroom_skips_fresh_probe(monkeypatch):
     """Comfortable headroom must NOT trigger the extra chain probe."""
     monkeypatch.setenv("HOMERUN_COLLATERAL_KEEPER_ENABLED", "1")
-    settings.LIVE_BUY_GATE_THIN_HEADROOM_USD = 5.0
-    service = _make_service(available=1000.0, min_balance=0.0)
+    monkeypatch.setattr(settings, "LIVE_BUY_GATE_THIN_HEADROOM_USD", 5.0)
+    service = _make_service(monkeypatch, available=1000.0, min_balance=0.0)
     await service._enforce_buy_pre_submit_gate(token_id="tok", required_notional_usd=Decimal("10"))
     # Replace get_balance with a raiser: comfortable headroom must not probe.
     async def _raise(*, force_probe_all: bool = False):
