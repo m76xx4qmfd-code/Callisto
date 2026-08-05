@@ -15,15 +15,6 @@ import services.live_execution_service as live_execution_module
 from services.live_execution_service import Order, OrderSide, OrderStatus, LiveExecutionService
 
 
-@pytest.fixture(autouse=True)
-def _allow_isolated_legacy_service_unit_tests(monkeypatch):
-    monkeypatch.setattr(
-        LiveExecutionService,
-        "is_ready",
-        lambda self: self._initialized and self._client is not None,
-    )
-
-
 class _SequencedClient:
     def __init__(self, outcomes: list[bool]):
         self._outcomes = list(outcomes)

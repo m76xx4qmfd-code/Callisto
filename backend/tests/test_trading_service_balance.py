@@ -21,15 +21,6 @@ from services.live_execution_service import (
 )
 
 
-@pytest.fixture(autouse=True)
-def _allow_isolated_legacy_service_unit_tests(monkeypatch):
-    monkeypatch.setattr(
-        LiveExecutionService,
-        "is_ready",
-        lambda self: self._initialized and self._client is not None,
-    )
-
-
 class _BalanceClient:
     def __init__(self, payload, *, fail_on_update: bool = False, builder_signature_type: int | None = 0):
         self.payload = payload
