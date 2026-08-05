@@ -20,7 +20,7 @@ if str(BACKEND_ROOT) not in sys.path:
     sys.path.insert(0, str(BACKEND_ROOT))
 
 from api import routes_workers
-from models.database import Base, KalshiPortfolioProjectionLease
+from models.database import Base, KalshiPortfolioProjectionLease, WorkerSnapshot
 from services import worker_state
 from services.kalshi_portfolio_projection import (
     KalshiPortfolioLeaseService,
@@ -199,6 +199,9 @@ async def test_enabled_production_composition_is_get_only_and_uses_manifest_scop
     assert captured["synchronizer"]["subaccount"] == 7
     assert runtime.fence_token == 13
     assert captured["transport"] is True
+    runner_args = captured["runner"]
+    assert isinstance(runner_args, dict)
+    assert callable(runner_args["on_invalidation"])
     assert "generated-test-key" not in repr(runtime)
     assert pem not in repr(runtime)
 
@@ -250,6 +253,45 @@ async def test_lease_loss_cancels_and_awaits_private_runner(monkeypatch):
 
     lease.renew.assert_awaited_once()
     assert cancelled.is_set()
+
+
+@pytest.mark.db
+@pytest.mark.asyncio
+async def test_private_invalidation_immediately_retracts_durable_readiness():
+    engine, session_factory = await build_postgres_session_factory(Base, "kalshi_worker_private_invalidation")
+    try:
+        principal = "c" * 64
+        now = datetime(2026, 8, 4, 12, tzinfo=timezone.utc)
+        async with session_factory() as session, session.begin():
+            session.add(
+                WorkerSnapshot(
+                    worker_name=worker.WORKER_NAME,
+                    updated_at=now,
+                    running=True,
+                    enabled=True,
+                    current_activity="Authoritative portfolio synchronized",
+                    interval_seconds=5,
+                    stats_json={
+                        "retry_allowed": False,
+                        "ready": True,
+                        "degraded": False,
+                        "principal_fingerprint": principal,
+                    },
+                )
+            )
+
+        await worker._persist_private_invalidation(session_factory, principal, "private_frame")
+
+        async with session_factory() as session:
+            snapshot = await session.get(WorkerSnapshot, worker.WORKER_NAME)
+        assert snapshot is not None
+        assert snapshot.current_activity == "Authoritative portfolio synchronization invalidated"
+        assert snapshot.stats_json["ready"] is False
+        assert snapshot.stats_json["degraded"] is True
+        assert snapshot.stats_json["invalidation_reason"] == "private_frame"
+        assert snapshot.stats_json["retry_allowed"] is False
+    finally:
+        await engine.dispose()
 
 
 @pytest.mark.db

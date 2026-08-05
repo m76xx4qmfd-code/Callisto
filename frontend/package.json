@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
+    "test:kalshi-portfolio-wire": "node --experimental-strip-types scripts/test-kalshi-portfolio-wire.mjs",
     "preview": "vite preview"
   },
   "dependencies": {

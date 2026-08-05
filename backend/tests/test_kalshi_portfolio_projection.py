@@ -22,6 +22,7 @@ from models.database import (
     WorkerControl,
     WorkerSnapshot,
 )
+from services.kalshi_portfolio_coverage import KalshiPortfolioCoverageService
 from services.kalshi_portfolio_projection import (
     KalshiPortfolioLeaseService,
     KalshiPortfolioPrincipalNotFoundError,
@@ -213,6 +214,84 @@ async def test_projection_exact_membership_fixed_point_empty_and_principal_isola
         assert first_unknown_activity["order_ids"] == ["unknown-first"]
         with pytest.raises(KalshiPortfolioPrincipalNotFoundError):
             await reader.read("e" * 64)
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.db
+@pytest.mark.asyncio
+async def test_reader_surfaces_unprojected_coverage_as_degraded_safety_evidence() -> None:
+    engine, sf = await build_postgres_session_factory(Base, "kalshi_projection_orphan_coverage")
+    try:
+        async with sf() as session, session.begin():
+            session.add(
+                WorkerControl(
+                    worker_name="kalshi_portfolio_sync",
+                    is_enabled=True,
+                    is_paused=False,
+                    interval_seconds=5,
+                    requested_run_at=None,
+                    updated_at=NOW,
+                )
+            )
+        lease = KalshiPortfolioLeaseService(sf)
+        reader = KalshiPortfolioProjectionReader(sf, stale_after=timedelta(minutes=5), now=lambda: NOW)
+
+        first_principal = "8" * 64
+        first_token = await lease.acquire(first_principal, "first-worker", NOW, timedelta(minutes=1))
+        first_client = ProjectionClient(
+            principal_fingerprint=first_principal,
+            current_orders={None: KalshiOrdersPage(orders=(_order(order_id="first-orphan"),), cursor="")},
+        )
+        await KalshiPortfolioCoverageService(
+            sf,
+            first_client,
+            expected_lease_owner="first-worker",
+            expected_fence_token=first_token,
+            now=lambda: NOW,
+        ).sweep("first-orphan-coverage", NOW)
+
+        first_snapshot = await reader.read(first_principal)
+        assert first_snapshot["readiness"] == "degraded"
+        assert first_snapshot["reason"] == "coverage_pending_projection"
+        assert first_snapshot["projection_id"] is None
+        first_unknown = first_snapshot["unknown_activity"]
+        assert isinstance(first_unknown, dict)
+        assert first_unknown["order_ids"] == ["first-orphan"]
+
+        healthy_principal = "9" * 64
+        healthy_token = await lease.acquire(healthy_principal, "healthy-worker", NOW, timedelta(minutes=1))
+        healthy_client = ProjectionClient(principal_fingerprint=healthy_principal)
+        await KalshiPortfolioProjectionSynchronizer(
+            sf,
+            healthy_client,
+            subaccount=0,
+            expected_lease_owner="healthy-worker",
+            expected_fence_token=healthy_token,
+            correctness_freshness_bound=timedelta(seconds=5),
+            now=lambda: NOW,
+        ).synchronize("healthy")
+        healthy_client.pages["orders"] = {
+            None: KalshiOrdersPage(orders=(_order(order_id="later-orphan"),), cursor="")
+        }
+        healthy_client.cutoffs = [CUTOFF, CUTOFF]
+        await KalshiPortfolioCoverageService(
+            sf,
+            healthy_client,
+            expected_lease_owner="healthy-worker",
+            expected_fence_token=healthy_token,
+            now=lambda: NOW + timedelta(seconds=1),
+        ).sweep("later-orphan-coverage", NOW + timedelta(seconds=1))
+
+        later_snapshot = await KalshiPortfolioProjectionReader(
+            sf, stale_after=timedelta(minutes=5), now=lambda: NOW + timedelta(seconds=1)
+        ).read(healthy_principal)
+        assert later_snapshot["readiness"] == "degraded"
+        assert later_snapshot["reason"] == "coverage_pending_projection"
+        assert later_snapshot["projection_id"] == "healthy"
+        later_unknown = later_snapshot["unknown_activity"]
+        assert isinstance(later_unknown, dict)
+        assert later_unknown["order_ids"] == ["later-orphan"]
     finally:
         await engine.dispose()
 

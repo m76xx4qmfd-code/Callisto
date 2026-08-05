@@ -524,9 +524,13 @@ class KalshiPortfolioProjectionReader:
         requested_principal = _validate_principal(principal_fingerprint) if principal_fingerprint is not None else None
         async with self._session_factory() as session, session.begin():
             await session.execute(text("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ"))
-            principals = tuple(
-                sorted(set((await session.scalars(select(KalshiPortfolioProjectionHead.principal_fingerprint))).all()))
-            )
+            head_principals = (
+                await session.scalars(select(KalshiPortfolioProjectionHead.principal_fingerprint))
+            ).all()
+            coverage_principals = (
+                await session.scalars(select(KalshiPortfolioCoverageCheckpoint.principal_fingerprint))
+            ).all()
+            principals = tuple(sorted(set(head_principals) | set(coverage_principals)))
             control = await session.get(WorkerControl, "kalshi_portfolio_sync")
             worker_enabled = bool(control is not None and control.is_enabled)
             if requested_principal is None:
@@ -616,8 +620,37 @@ class KalshiPortfolioProjectionReader:
                     "error_type": worker_snapshot.last_error if worker_snapshot is not None else None,
                 },
             }
+            safety_checkpoint = await session.scalar(
+                select(KalshiPortfolioCoverageCheckpoint)
+                .where(KalshiPortfolioCoverageCheckpoint.principal_fingerprint == principal)
+                .order_by(
+                    KalshiPortfolioCoverageCheckpoint.observed_at.desc(),
+                    KalshiPortfolioCoverageCheckpoint.coverage_id.desc(),
+                )
+                .limit(1)
+            )
+            coverage_projected = False
+            if safety_checkpoint is not None:
+                base["unknown_activity"] = {
+                    "order_ids": list(safety_checkpoint.unknown_order_ids_json),
+                    "client_order_ids": list(safety_checkpoint.unknown_client_order_ids_json),
+                    "fill_ids": list(safety_checkpoint.unknown_fill_ids_json),
+                }
+                coverage_projected = (
+                    await session.scalar(
+                        select(KalshiPortfolioProjectionAttempt.projection_id)
+                        .where(
+                            KalshiPortfolioProjectionAttempt.principal_fingerprint == principal,
+                            KalshiPortfolioProjectionAttempt.coverage_id == safety_checkpoint.coverage_id,
+                        )
+                        .limit(1)
+                    )
+                    is not None
+                )
             if head is None:
-                if worker_enabled:
+                if safety_checkpoint is not None and not coverage_projected:
+                    base.update(readiness="degraded", reason="coverage_pending_projection")
+                elif worker_enabled:
                     base.update(readiness="never_synchronized", reason="no_projection_attempt")
                 else:
                     base.update(readiness="disabled", reason="projection_worker_disabled")
@@ -647,35 +680,6 @@ class KalshiPortfolioProjectionReader:
                 "completed_at": _exact_json(_utc(latest.completed_at)),
             }
             base["gaps"] = list(latest.gaps_json)
-            safety_attempt = await session.scalar(
-                select(KalshiPortfolioProjectionAttempt)
-                .where(
-                    KalshiPortfolioProjectionAttempt.principal_fingerprint == principal,
-                    KalshiPortfolioProjectionAttempt.coverage_id.is_not(None),
-                )
-                .order_by(
-                    KalshiPortfolioProjectionAttempt.completed_at.desc(),
-                    KalshiPortfolioProjectionAttempt.projection_id.desc(),
-                )
-                .limit(1)
-            )
-            safety_checkpoint = (
-                await session.get(
-                    KalshiPortfolioCoverageCheckpoint,
-                    {
-                        "principal_fingerprint": principal,
-                        "coverage_id": safety_attempt.coverage_id,
-                    },
-                )
-                if safety_attempt is not None
-                else None
-            )
-            if safety_checkpoint is not None:
-                base["unknown_activity"] = {
-                    "order_ids": list(safety_checkpoint.unknown_order_ids_json),
-                    "client_order_ids": list(safety_checkpoint.unknown_client_order_ids_json),
-                    "fill_ids": list(safety_checkpoint.unknown_fill_ids_json),
-                }
             if healthy is None:
                 base.update(readiness="degraded", reason=latest.reason)
                 return base
@@ -757,6 +761,8 @@ class KalshiPortfolioProjectionReader:
             age = _utc(self._now()) - as_of
             if not worker_enabled:
                 readiness, reason = "disabled", "projection_worker_disabled"
+            elif safety_checkpoint is not None and not coverage_projected:
+                readiness, reason = "degraded", "coverage_pending_projection"
             elif latest.projection_id != healthy.projection_id:
                 readiness, reason = "degraded", latest.reason
             elif not worker_principal_matches:

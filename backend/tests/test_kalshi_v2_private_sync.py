@@ -161,6 +161,51 @@ def test_runner_subscribes_then_syncs_and_dirty_during_sync_forces_follow_up() -
     asyncio.run(scenario())
 
 
+def test_private_frame_persists_invalidation_before_recovery_sync() -> None:
+    async def scenario() -> None:
+        transport = FakeTransport()
+        lifecycle = _lifecycle()
+        synchronizer = FakeSynchronizer(lifecycle.principal_fingerprint)
+        invalidation_started = asyncio.Event()
+        release_invalidation = asyncio.Event()
+        reasons: list[str] = []
+
+        async def persist_invalidation(reason: str) -> None:
+            reasons.append(reason)
+            invalidation_started.set()
+            await release_invalidation.wait()
+
+        runner = KalshiPrivateSyncRunner(
+            lifecycle=lifecycle,
+            transport_factory=FakeFactory([transport]),
+            synchronizer=synchronizer,
+            debounce_seconds=0.01,
+            minimum_sync_interval_seconds=0.01,
+            acknowledgement_timeout_seconds=1,
+            on_invalidation=persist_invalidation,
+        )
+        task = asyncio.create_task(runner.run())
+        await _ack_all(transport)
+        assert await synchronizer.started.get() == 1
+        while not runner.ready:
+            await asyncio.sleep(0)
+
+        await transport.frames.put(_position())
+        await asyncio.wait_for(invalidation_started.wait(), timeout=1)
+        assert runner.ready is False
+        assert synchronizer.calls == 1
+        assert reasons == ["private_frame"]
+
+        release_invalidation.set()
+        assert await asyncio.wait_for(synchronizer.started.get(), timeout=1) == 2
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert reasons[-1] == "cancelled"
+
+    asyncio.run(scenario())
+
+
 def test_frame_between_subscription_acks_forces_post_bootstrap_follow_up() -> None:
     async def scenario() -> None:
         transport = FakeTransport()
