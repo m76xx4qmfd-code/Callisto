@@ -34,6 +34,17 @@ if str(BACKEND_ROOT) not in sys.path:
     sys.path.insert(0, str(BACKEND_ROOT))
 
 
+def test_runtime_snapshot_lag_type_matches_migration() -> None:
+    from sqlalchemy import Numeric
+
+    from models.database import KalshiPortfolioRuntimeSnapshot
+
+    column_type = KalshiPortfolioRuntimeSnapshot.__table__.c.lag_seconds.type
+    assert isinstance(column_type.impl, Numeric)
+    assert column_type.impl.precision == 24
+    assert column_type.impl.scale == 12
+
+
 def _build_alembic_config(sync_connection) -> Config:
     """Return an Alembic ``Config`` wired to the given sync connection.
 
@@ -132,6 +143,62 @@ async def test_head_migration_downgrade_upgrade_roundtrip() -> None:
 
 
 @pytest.mark.db
+@pytest.mark.asyncio
+async def test_head_migration_from_previous_revision_creates_runtime_snapshot_schema() -> None:
+    import asyncpg
+    from sqlalchemy import MetaData, inspect
+
+    from tests.postgres_test_db import build_postgres_session_factory
+
+    engine = None
+    try:
+        engine, _factory = await build_postgres_session_factory(MetaData(), "alembic_head_schema")
+    except (OSError, ValueError, asyncpg.PostgresError) as exc:
+        pytest.skip(f"Postgres unreachable for head migration schema test: {exc}")
+
+    assert engine is not None
+    try:
+        script = ScriptDirectory.from_config(Config(str(BACKEND_ROOT / "alembic.ini")))
+        head_revision = script.get_current_head()
+        assert head_revision is not None
+        head_script = script.get_revision(head_revision)
+        previous_revision = head_script.down_revision
+        assert isinstance(previous_revision, str) and previous_revision
+
+        async with engine.connect() as conn:
+
+            def _upgrade_head(sync_conn) -> tuple[set[str], object]:
+                cfg = _build_alembic_config(sync_conn)
+                command.stamp(cfg, previous_revision)
+                command.upgrade(cfg, head_revision)
+                columns = inspect(sync_conn).get_columns("kalshi_portfolio_runtime_snapshots")
+                return {column["name"] for column in columns}, next(
+                    column for column in columns if column["name"] == "lag_seconds"
+                )
+
+            runtime_columns, lag_seconds_column = await conn.run_sync(_upgrade_head)
+
+        assert runtime_columns == {
+            "principal_fingerprint",
+            "updated_at",
+            "last_run_at",
+            "running",
+            "enabled",
+            "current_activity",
+            "interval_seconds",
+            "lag_seconds",
+            "last_error",
+            "stats_json",
+        }
+        lag_seconds_type = lag_seconds_column["type"]
+        assert getattr(lag_seconds_type, "precision", None) == 24
+        assert getattr(lag_seconds_type, "scale", None) == 12
+        assert lag_seconds_column["nullable"] is True
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.db
 @pytest.mark.slow
 @pytest.mark.asyncio
 async def test_alembic_replay_base_to_head_on_empty_db() -> None:
@@ -173,6 +240,7 @@ async def test_alembic_replay_base_to_head_on_empty_db() -> None:
     except Exception as exc:  # pragma: no cover — defensive
         pytest.skip(f"DB harness unavailable: {exc}")
 
+    engine = None
     try:
         # Pass an empty MetaData so the factory does NOT pre-create
         # the schema — we want a true empty DB for alembic to
@@ -183,6 +251,7 @@ async def test_alembic_replay_base_to_head_on_empty_db() -> None:
     except Exception as exc:
         pytest.skip(f"Postgres unreachable for alembic replay: {exc}")
 
+    assert engine is not None
     try:
         script = ScriptDirectory.from_config(
             Config(str(BACKEND_ROOT / "alembic.ini"))
@@ -238,6 +307,27 @@ async def test_alembic_replay_base_to_head_on_empty_db() -> None:
             f"After full replay expected {head_revision!r}, "
             f"subprocess observed {observed!r}"
         )
+        async with engine.connect() as conn:
+            runtime_columns = await conn.run_sync(
+                lambda sync_conn: {
+                    column["name"]
+                    for column in __import__("sqlalchemy").inspect(sync_conn).get_columns(
+                        "kalshi_portfolio_runtime_snapshots"
+                    )
+                }
+            )
+        assert runtime_columns == {
+            "principal_fingerprint",
+            "updated_at",
+            "last_run_at",
+            "running",
+            "enabled",
+            "current_activity",
+            "interval_seconds",
+            "lag_seconds",
+            "last_error",
+            "stats_json",
+        }
     finally:
         await engine.dispose()
 

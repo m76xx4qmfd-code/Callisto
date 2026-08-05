@@ -25,8 +25,8 @@ from models.database import (
     KalshiPortfolioProjectionAttempt,
     KalshiPortfolioProjectionHead,
     KalshiPortfolioProjectionLease,
+    KalshiPortfolioRuntimeSnapshot,
     WorkerControl,
-    WorkerSnapshot,
 )
 from services.kalshi_portfolio_coverage import KalshiPortfolioCoverageService
 from services.venues.kalshi_v2 import KalshiPositionsPage, KalshiSettlementsPage
@@ -127,6 +127,7 @@ class KalshiPortfolioLeaseService:
         if ttl.total_seconds() <= 0:
             raise ValueError("lease ttl must be positive")
         async with self._session_factory() as session, session.begin():
+            await session.execute(text("SET LOCAL synchronous_commit = on"))
             inserted_token = await session.scalar(
                 pg_insert(KalshiPortfolioProjectionLease)
                 .values(
@@ -180,6 +181,7 @@ class KalshiPortfolioLeaseService:
         if not owner or fence_token <= 0 or ttl.total_seconds() <= 0:
             raise ValueError("valid owner, fence token, and positive lease ttl are required")
         async with self._session_factory() as session, session.begin():
+            await session.execute(text("SET LOCAL synchronous_commit = on"))
             row = await session.scalar(
                 select(KalshiPortfolioProjectionLease)
                 .where(KalshiPortfolioProjectionLease.principal_fingerprint == principal)
@@ -211,6 +213,7 @@ class KalshiPortfolioLeaseService:
         if not owner or fence_token <= 0:
             raise ValueError("valid owner and fence token are required")
         async with self._session_factory() as session, session.begin():
+            await session.execute(text("SET LOCAL synchronous_commit = on"))
             row = await session.scalar(
                 select(KalshiPortfolioProjectionLease)
                 .where(KalshiPortfolioProjectionLease.principal_fingerprint == principal)
@@ -264,6 +267,7 @@ class KalshiPortfolioProjectionSynchronizer:
             raise ValueError("projection_id is required")
         started_at = _utc(self._now())
         async with self._session_factory() as session, session.begin():
+            await session.execute(text("SET LOCAL synchronous_commit = on"))
             lease = await session.scalar(
                 select(KalshiPortfolioProjectionLease)
                 .where(KalshiPortfolioProjectionLease.principal_fingerprint == principal)
@@ -364,6 +368,7 @@ class KalshiPortfolioProjectionSynchronizer:
             retry_allowed=False,
         )
         async with self._session_factory() as session, session.begin():
+            await session.execute(text("SET LOCAL synchronous_commit = on"))
             lease = await session.scalar(
                 select(KalshiPortfolioProjectionLease)
                 .where(KalshiPortfolioProjectionLease.principal_fingerprint == principal)
@@ -415,6 +420,7 @@ class KalshiPortfolioProjectionSynchronizer:
         reason: str,
     ) -> None:
         async with self._session_factory() as session, session.begin():
+            await session.execute(text("SET LOCAL synchronous_commit = on"))
             lease = await session.scalar(
                 select(KalshiPortfolioProjectionLease)
                 .where(KalshiPortfolioProjectionLease.principal_fingerprint == principal)
@@ -524,15 +530,15 @@ class KalshiPortfolioProjectionReader:
         requested_principal = _validate_principal(principal_fingerprint) if principal_fingerprint is not None else None
         async with self._session_factory() as session, session.begin():
             await session.execute(text("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ"))
-            head_principals = (
-                await session.scalars(select(KalshiPortfolioProjectionHead.principal_fingerprint))
-            ).all()
+            head_principals = (await session.scalars(select(KalshiPortfolioProjectionHead.principal_fingerprint))).all()
             coverage_principals = (
                 await session.scalars(select(KalshiPortfolioCoverageCheckpoint.principal_fingerprint))
             ).all()
             principals = tuple(sorted(set(head_principals) | set(coverage_principals)))
             control = await session.get(WorkerControl, "kalshi_portfolio_sync")
             worker_enabled = bool(control is not None and control.is_enabled)
+            worker_paused = bool(control is not None and control.is_paused)
+            worker_operational = worker_enabled and not worker_paused
             if requested_principal is None:
                 if len(principals) > 1:
                     raise KalshiPortfolioPrincipalAmbiguityError(principals)
@@ -540,8 +546,14 @@ class KalshiPortfolioProjectionReader:
                     return {
                         "principal_fingerprint": None,
                         "retry_allowed": False,
-                        "readiness": "never_synchronized" if worker_enabled else "disabled",
-                        "reason": "no_projection_attempt" if worker_enabled else "projection_worker_disabled",
+                        "readiness": ("disabled" if not worker_enabled or worker_paused else "never_synchronized"),
+                        "reason": (
+                            "projection_worker_disabled"
+                            if not worker_enabled
+                            else "projection_worker_paused"
+                            if worker_paused
+                            else "no_projection_attempt"
+                        ),
                         "scope": None,
                         "projection_id": None,
                         "last_healthy_as_of": None,
@@ -570,11 +582,24 @@ class KalshiPortfolioProjectionReader:
                 if requested_principal not in principals:
                     raise KalshiPortfolioPrincipalNotFoundError("Kalshi principal has no durable projection history")
                 principal = requested_principal
-            worker_snapshot = await session.get(WorkerSnapshot, "kalshi_portfolio_sync")
+            worker_snapshot = await session.get(KalshiPortfolioRuntimeSnapshot, principal)
             worker_stats = worker_snapshot.stats_json if worker_snapshot is not None else {}
             if not isinstance(worker_stats, dict):
                 worker_stats = {}
             worker_principal_matches = worker_stats.get("principal_fingerprint") == principal
+            worker_lease = await session.get(KalshiPortfolioProjectionLease, principal)
+            worker_lease_expiry = (
+                _utc(worker_lease.expires_at)
+                if worker_lease is not None and worker_lease.expires_at is not None
+                else None
+            )
+            worker_lease_matches = bool(
+                worker_lease is not None
+                and worker_stats.get("lease_owner_id") == worker_lease.owner_id
+                and worker_stats.get("lease_fence_token") == worker_lease.fence_token
+                and worker_lease_expiry is not None
+                and worker_lease_expiry > _utc(self._now())
+            )
             worker_snapshot_updated_at = (
                 _utc(worker_snapshot.updated_at)
                 if worker_snapshot is not None and worker_snapshot.updated_at is not None
@@ -608,10 +633,18 @@ class KalshiPortfolioProjectionReader:
                         worker_snapshot is not None
                         and worker_snapshot.running
                         and worker_principal_matches
+                        and worker_lease_matches
                         and worker_snapshot_fresh
                     ),
                     "ready": bool(
-                        worker_stats.get("ready", False) and worker_principal_matches and worker_snapshot_fresh
+                        worker_stats.get("ready", False)
+                        and worker_principal_matches
+                        and worker_lease_matches
+                        and worker_snapshot_fresh
+                        and worker_operational
+                        and worker_snapshot is not None
+                        and worker_snapshot.running
+                        and worker_snapshot.enabled
                     ),
                     "degraded": bool(worker_stats.get("degraded", False)),
                     "principal_matches": worker_principal_matches,
@@ -650,10 +683,12 @@ class KalshiPortfolioProjectionReader:
             if head is None:
                 if safety_checkpoint is not None and not coverage_projected:
                     base.update(readiness="degraded", reason="coverage_pending_projection")
-                elif worker_enabled:
-                    base.update(readiness="never_synchronized", reason="no_projection_attempt")
-                else:
+                elif not worker_enabled:
                     base.update(readiness="disabled", reason="projection_worker_disabled")
+                elif worker_paused:
+                    base.update(readiness="disabled", reason="projection_worker_paused")
+                else:
+                    base.update(readiness="never_synchronized", reason="no_projection_attempt")
                 return base
             latest = await session.get(
                 KalshiPortfolioProjectionAttempt,
@@ -761,14 +796,22 @@ class KalshiPortfolioProjectionReader:
             age = _utc(self._now()) - as_of
             if not worker_enabled:
                 readiness, reason = "disabled", "projection_worker_disabled"
+            elif worker_paused:
+                readiness, reason = "disabled", "projection_worker_paused"
             elif safety_checkpoint is not None and not coverage_projected:
                 readiness, reason = "degraded", "coverage_pending_projection"
             elif latest.projection_id != healthy.projection_id:
                 readiness, reason = "degraded", latest.reason
             elif not worker_principal_matches:
                 readiness, reason = "degraded", "private_sync_runtime_principal_mismatch"
+            elif not worker_lease_matches:
+                readiness, reason = "degraded", "private_sync_runtime_lease_lost"
             elif not worker_snapshot_fresh:
                 readiness, reason = "degraded", "private_sync_runtime_stale"
+            elif worker_snapshot is None or not worker_snapshot.enabled:
+                readiness, reason = "degraded", "private_sync_runtime_disabled"
+            elif not worker_snapshot.running:
+                readiness, reason = "degraded", "private_sync_runtime_not_running"
             elif not bool(worker_stats.get("ready", False)):
                 readiness, reason = "degraded", "private_sync_runtime_not_ready"
             elif age > self._stale_after:

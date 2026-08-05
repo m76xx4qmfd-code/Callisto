@@ -168,10 +168,10 @@ def test_private_frame_persists_invalidation_before_recovery_sync() -> None:
         synchronizer = FakeSynchronizer(lifecycle.principal_fingerprint)
         invalidation_started = asyncio.Event()
         release_invalidation = asyncio.Event()
-        reasons: list[str] = []
+        invalidations: list[tuple[str, int]] = []
 
-        async def persist_invalidation(reason: str) -> None:
-            reasons.append(reason)
+        async def persist_invalidation(reason: str, readiness_revision: int) -> None:
+            invalidations.append((reason, readiness_revision))
             invalidation_started.set()
             await release_invalidation.wait()
 
@@ -194,14 +194,14 @@ def test_private_frame_persists_invalidation_before_recovery_sync() -> None:
         await asyncio.wait_for(invalidation_started.wait(), timeout=1)
         assert runner.ready is False
         assert synchronizer.calls == 1
-        assert reasons == ["private_frame"]
+        assert invalidations == [("private_frame", 2)]
 
         release_invalidation.set()
         assert await asyncio.wait_for(synchronizer.started.get(), timeout=1) == 2
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await task
-        assert reasons[-1] == "cancelled"
+        assert invalidations[-1] == ("cancelled", 3)
 
     asyncio.run(scenario())
 

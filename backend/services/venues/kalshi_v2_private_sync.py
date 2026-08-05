@@ -68,7 +68,7 @@ class KalshiPrivateSyncRunner:
         maximum_backoff_seconds: float = 30.0,
         monotonic: Callable[[], float] = time.monotonic,
         now_ms: Callable[[], int] | None = None,
-        on_invalidation: Callable[[str], Awaitable[None]] | None = None,
+        on_invalidation: Callable[[str, int], Awaitable[None]] | None = None,
     ) -> None:
         durations = {
             "debounce_seconds": debounce_seconds,
@@ -107,6 +107,7 @@ class KalshiPrivateSyncRunner:
         self._connected = False
         self._acknowledged = False
         self._ready_flag = False
+        self._readiness_revision = 0
         self._dirty_version = 0
         self._dirty_event = asyncio.Event()
         self._ack_event = asyncio.Event()
@@ -128,6 +129,10 @@ class KalshiPrivateSyncRunner:
             and self._monotonic() - synchronized_at <= self._max_staleness
             and self._synchronizer.principal_fingerprint == self._principal_fingerprint
         )
+
+    @property
+    def readiness_revision(self) -> int:
+        return self._readiness_revision
 
     @property
     def degraded_reason(self) -> str | None:
@@ -215,6 +220,7 @@ class KalshiPrivateSyncRunner:
                 if outcome.kind == "frame":
                     self._dirty_version += 1
                     self._ready_flag = False
+                    self._readiness_revision += 1
                     await self._notify_invalidation("private_frame")
                     self._dirty_event.set()
                     continue
@@ -251,6 +257,7 @@ class KalshiPrivateSyncRunner:
             self._last_synchronized_at = self._monotonic()
             if self._dirty_version == observed_dirty_version and not require_follow_up:
                 self._ready_flag = True
+                self._readiness_revision += 1
                 return
             require_follow_up = False
 
@@ -320,7 +327,7 @@ class KalshiPrivateSyncRunner:
         callback = self._on_invalidation
         if callback is None:
             return
-        notification = asyncio.ensure_future(callback(reason))
+        notification = asyncio.ensure_future(callback(reason, self._readiness_revision))
         try:
             await asyncio.shield(notification)
         except asyncio.CancelledError:
@@ -330,6 +337,7 @@ class KalshiPrivateSyncRunner:
 
     def _retract(self, reason: str) -> None:
         self._ready_flag = False
+        self._readiness_revision += 1
         self._connected = False
         self._acknowledged = False
         self._last_synchronized_at = None
