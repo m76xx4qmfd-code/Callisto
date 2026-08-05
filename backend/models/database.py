@@ -3511,6 +3511,7 @@ class KalshiPortfolioRuntimeSnapshot(Base):
 
 
 def _register_immutable_ledger_table(table) -> None:  # noqa: ANN001
+    table.info["immutable_rows"] = True
     _sa_event.listen(
         table,
         "after_create",
