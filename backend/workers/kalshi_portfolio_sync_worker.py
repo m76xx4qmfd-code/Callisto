@@ -120,6 +120,31 @@ def _load_credential_config(environment: Mapping[str, str] | None = None) -> _Cr
     )
 
 
+async def _persist_private_invalidation(
+    session_factory: Any,
+    principal_fingerprint: str,
+    reason: str,
+) -> None:
+    """Retract durable readiness before private-frame recovery may publish again."""
+    async with session_factory() as session, session.begin():
+        snapshot = await session.get(WorkerSnapshot, WORKER_NAME, with_for_update=True)
+        if snapshot is None:
+            return
+        stats = snapshot.stats_json if isinstance(snapshot.stats_json, dict) else {}
+        if stats.get("principal_fingerprint") != principal_fingerprint:
+            return
+        snapshot.updated_at = _utcnow()
+        snapshot.current_activity = "Authoritative portfolio synchronization invalidated"
+        snapshot.stats_json = {
+            **stats,
+            "retry_allowed": False,
+            "ready": False,
+            "degraded": True,
+            "invalidation_reason": reason,
+        }
+        await session.flush()
+
+
 async def _compose_enabled_runtime(
     session_factory: Any,
     owner_id: str,
@@ -173,10 +198,14 @@ async def _compose_enabled_runtime(
             signer=signer,
             principal_origin=credentials.approved_origin,
         )
+        async def persist_invalidation(reason: str) -> None:
+            await _persist_private_invalidation(session_factory, principal, reason)
+
         runner = KalshiPrivateSyncRunner(
             lifecycle=lifecycle,
             transport_factory=KalshiWebsocketsTransportFactory(),
             synchronizer=cast(Any, synchronizer),
+            on_invalidation=persist_invalidation,
         )
         return EnabledRuntime(
             client=client,

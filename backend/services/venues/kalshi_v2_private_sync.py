@@ -68,6 +68,7 @@ class KalshiPrivateSyncRunner:
         maximum_backoff_seconds: float = 30.0,
         monotonic: Callable[[], float] = time.monotonic,
         now_ms: Callable[[], int] | None = None,
+        on_invalidation: Callable[[str], Awaitable[None]] | None = None,
     ) -> None:
         durations = {
             "debounce_seconds": debounce_seconds,
@@ -101,6 +102,7 @@ class KalshiPrivateSyncRunner:
         self._maximum_backoff = float(maximum_backoff_seconds)
         self._monotonic = monotonic
         self._now_ms = now_ms or (lambda: time.time_ns() // 1_000_000)
+        self._on_invalidation = on_invalidation
         self._last_connection_timestamp_ms = 0
         self._connected = False
         self._acknowledged = False
@@ -177,13 +179,13 @@ class KalshiPrivateSyncRunner:
                 backoff = self._initial_backoff
                 await self._steady_state(reader)
             except asyncio.CancelledError:
-                self._retract("cancelled")
+                await self._invalidate("cancelled")
                 raise
             except KalshiPrivatePrincipalMismatchError:
-                self._retract("principal_mismatch")
+                await self._invalidate("principal_mismatch")
                 raise
             except Exception as exc:  # noqa: BLE001 - every boundary failure reconnects fail closed.
-                self._retract(type(exc).__name__)
+                await self._invalidate(type(exc).__name__)
             finally:
                 if reader is not None and not reader.done():
                     reader.cancel()
@@ -213,6 +215,7 @@ class KalshiPrivateSyncRunner:
                 if outcome.kind == "frame":
                     self._dirty_version += 1
                     self._ready_flag = False
+                    await self._notify_invalidation("private_frame")
                     self._dirty_event.set()
                     continue
                 raise _GenerationEnded("unknown lifecycle outcome")
@@ -308,6 +311,22 @@ class KalshiPrivateSyncRunner:
             raise
         except Exception:  # noqa: BLE001 - transport close failures cannot prevent fail-closed teardown.
             return
+
+    async def _invalidate(self, reason: str) -> None:
+        self._retract(reason)
+        await self._notify_invalidation(reason)
+
+    async def _notify_invalidation(self, reason: str) -> None:
+        callback = self._on_invalidation
+        if callback is None:
+            return
+        notification = asyncio.ensure_future(callback(reason))
+        try:
+            await asyncio.shield(notification)
+        except asyncio.CancelledError:
+            with suppress(Exception):
+                await notification
+            raise
 
     def _retract(self, reason: str) -> None:
         self._ready_flag = False

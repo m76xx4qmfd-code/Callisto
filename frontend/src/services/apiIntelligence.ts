@@ -1,4 +1,5 @@
 import { api, getStrategyManagerItems, unwrapApiData, unwrapStrategyManagerPayload } from './apiClient'
+import { requireKalshiExactWireValues } from './kalshiPortfolioWire'
 import type { Opportunity } from './apiCore'
 
 import type { Trader } from './apiTraders'
@@ -304,9 +305,9 @@ export interface KalshiPortfolioScope {
   settlements: { kind: 'subaccount'; subaccount_numbers: number[] }
 }
 
-// Fixed-point values stay as text from the durable API through rendering.
-// Integer wire values are normalized to text by getKalshiPortfolioSnapshot so
-// account evidence is never fed into JavaScript number arithmetic.
+// Fixed-point and integer values must arrive as text from the durable API.
+// Numeric drift is rejected because converting an already-parsed JSON number
+// to text cannot recover precision lost above JavaScript's safe integer range.
 export type KalshiExactValue = string
 
 export interface KalshiPortfolioBalance {
@@ -447,28 +448,7 @@ export const getKalshiPortfolioSnapshot = async (
   const { data } = await api.get('/kalshi/portfolio/snapshot', {
     params: principalFingerprint ? { principal_fingerprint: principalFingerprint } : undefined,
   })
-  const snapshot = unwrapApiData(data) as KalshiPortfolioSnapshot
-  if (snapshot.balance) {
-    snapshot.balance.balance_cents = String(snapshot.balance.balance_cents)
-    snapshot.balance.portfolio_value_cents = String(snapshot.balance.portfolio_value_cents)
-    snapshot.balance.updated_ts = String(snapshot.balance.updated_ts)
-    snapshot.balance.balance_breakdown = snapshot.balance.balance_breakdown.map((entry) => ({
-      ...entry,
-      exchange_index: String(entry.exchange_index),
-    }))
-  }
-  if (snapshot.positions) snapshot.positions.subaccount_number = String(snapshot.positions.subaccount_number)
-  if (snapshot.settlements) {
-    snapshot.settlements.subaccount_number = String(snapshot.settlements.subaccount_number)
-    snapshot.settlements.settlements = snapshot.settlements.settlements.map((settlement) => ({
-      ...settlement,
-      revenue_cents: String(settlement.revenue_cents),
-      settlement_value_cents: settlement.settlement_value_cents == null
-        ? null
-        : String(settlement.settlement_value_cents),
-    }))
-  }
-  return snapshot
+  return requireKalshiExactWireValues<KalshiPortfolioSnapshot>(unwrapApiData(data))
 }
 
 export function getKalshiPrincipalChoices(error: unknown): string[] {
