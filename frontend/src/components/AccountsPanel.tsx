@@ -26,6 +26,7 @@ import { Badge } from './ui/badge'
 import { Button } from './ui/button'
 import { ScrollArea } from './ui/scroll-area'
 import KalshiAuthoritativePortfolio from './KalshiAuthoritativePortfolio'
+import KalshiPaperPanel from './KalshiPaperPanel'
 import {
   getAccountPositions,
   getAccountTrades,
@@ -40,13 +41,14 @@ import {
   getTradingStatus,
 } from '../services/api'
 
-type AccountsWorkspaceTab = 'overview' | 'sandbox' | 'live'
+type AccountsWorkspaceTab = 'overview' | 'paper' | 'sandbox' | 'live'
 type DeskView = 'overview' | 'positions' | 'activity'
 type LiveVenue = 'polymarket' | 'kalshi'
 const OPEN_SHADOW_ORDER_STATUSES = new Set(['submitted', 'executed', 'open'])
 
 const WORKSPACE_TAB_CONFIG: { id: AccountsWorkspaceTab; icon: React.ElementType }[] = [
   { id: 'overview', icon: LayoutDashboard },
+  { id: 'paper', icon: Receipt },
   { id: 'sandbox', icon: Shield },
   { id: 'live', icon: Zap },
 ]
@@ -730,6 +732,8 @@ export default function AccountsPanel({ onOpenSettings }: AccountsPanelProps) {
                   ? (
                     tab.id === 'overview'
                       ? 'bg-blue-500/20 text-blue-400 border-blue-500/30 hover:bg-blue-500/30 hover:text-blue-400'
+                      : tab.id === 'paper'
+                        ? 'bg-violet-500/20 text-violet-300 border-violet-500/30 hover:bg-violet-500/30 hover:text-violet-300'
                       : tab.id === 'sandbox'
                         ? 'bg-amber-500/20 text-amber-300 border-amber-500/30 hover:bg-amber-500/30 hover:text-amber-300'
                         : 'bg-emerald-500/20 text-emerald-400 border-emerald-500/30 hover:bg-emerald-500/30 hover:text-emerald-400'
@@ -738,7 +742,13 @@ export default function AccountsPanel({ onOpenSettings }: AccountsPanelProps) {
               )}
             >
               <tab.icon className="h-3.5 w-3.5" />
-              {tab.id === 'overview' ? t('accounts.tabOverview') : tab.id === 'sandbox' ? t('accounts.tabSandboxDesk') : t('accounts.tabLiveDesk')}
+              {tab.id === 'overview'
+                ? t('accounts.tabOverview')
+                : tab.id === 'paper'
+                  ? 'Kalshi Paper'
+                  : tab.id === 'sandbox'
+                    ? t('accounts.tabSandboxDesk')
+                    : t('accounts.tabLiveDesk')}
             </Button>
           ))}
         </div>
@@ -970,6 +980,10 @@ export default function AccountsPanel({ onOpenSettings }: AccountsPanelProps) {
             </CardContent>
           </Card>
         </div>
+      )}
+
+      {workspaceTab === 'paper' && (
+        <KalshiPaperPanel />
       )}
 
       {workspaceTab === 'sandbox' && (

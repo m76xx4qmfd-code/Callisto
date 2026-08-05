@@ -19,6 +19,10 @@
 - SDK guidance: https://docs.kalshi.com/sdks/overview
 - Current event-order V2 reference: https://docs.kalshi.com/api-reference/orders/create-order-v2
 - OpenAPI source of truth: https://docs.kalshi.com/openapi.yaml
+  - Retrieved: 2026-08-05
+  - Declared version: `3.27.0`
+  - SHA-256: `41d93050bf3f692cf3a898ba3a1a033f3e857fee56370ddcb18af6a4225f41cb`
+  - Paper scope: unauthenticated production market and fixed-point orderbook GET schemas only; no venue-write endpoint is exposed.
 - AsyncAPI source of truth: https://docs.kalshi.com/asyncapi.yaml
 
 ## Competitive landscape starting source
