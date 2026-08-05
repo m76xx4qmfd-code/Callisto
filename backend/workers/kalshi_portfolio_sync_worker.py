@@ -630,6 +630,20 @@ async def start_loop(
                     degraded=True,
                     now=now,
                 )
+            else:
+                control_updated_at = control.get("updated_at")
+                if isinstance(control_updated_at, datetime):
+                    await _write_snapshot(
+                        session_factory,
+                        expected_control_updated_at=control_updated_at,
+                        expected_paused=paused,
+                        running=False,
+                        enabled=enabled,
+                        activity="Authoritative portfolio synchronization failed to start",
+                        interval_seconds=interval,
+                        error_type=type(exc).__name__,
+                        stats={"lease_held": False, "ready": False, "degraded": True},
+                    )
         finally:
             if runtime is not None:
                 with suppress(Exception):

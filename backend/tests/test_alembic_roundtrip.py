@@ -34,6 +34,17 @@ if str(BACKEND_ROOT) not in sys.path:
     sys.path.insert(0, str(BACKEND_ROOT))
 
 
+def test_runtime_snapshot_lag_type_matches_migration() -> None:
+    from sqlalchemy import Numeric
+
+    from models.database import KalshiPortfolioRuntimeSnapshot
+
+    column_type = KalshiPortfolioRuntimeSnapshot.__table__.c.lag_seconds.type
+    assert isinstance(column_type.impl, Numeric)
+    assert column_type.impl.precision == 24
+    assert column_type.impl.scale == 12
+
+
 def _build_alembic_config(sync_connection) -> Config:
     """Return an Alembic ``Config`` wired to the given sync connection.
 

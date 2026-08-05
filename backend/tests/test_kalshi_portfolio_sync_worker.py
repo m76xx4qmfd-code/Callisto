@@ -98,6 +98,56 @@ async def test_missing_or_disabled_worker_never_touches_credentials_paths_import
     assert sys.modules.get("services.venues.kalshi_v2_ws_transport") is transport_module_before
 
 
+@pytest.mark.asyncio
+async def test_enabled_composition_failure_publishes_control_guarded_degraded_health(monkeypatch):
+    snapshots: list[dict] = []
+    entered_sleep = asyncio.Event()
+    release_sleep = asyncio.Event()
+    control_updated_at = datetime.now(timezone.utc)
+
+    async def enabled_control(_session_factory):
+        return {
+            "is_enabled": True,
+            "is_paused": False,
+            "interval_seconds": 5,
+            "updated_at": control_updated_at,
+        }
+
+    async def snapshot(_session_factory, **kwargs):
+        snapshots.append(kwargs)
+        return True
+
+    async def guarded_sleep(_seconds):
+        entered_sleep.set()
+        await release_sleep.wait()
+
+    monkeypatch.setattr(worker, "_read_control", enabled_control)
+    monkeypatch.setattr(worker, "_write_snapshot", snapshot)
+    compose = AsyncMock(side_effect=ValueError("credential manifest unavailable"))
+
+    task = asyncio.create_task(
+        worker.start_loop(session_factory=object(), compose=compose, sleep=guarded_sleep, owner_id="test-owner")
+    )
+    await asyncio.wait_for(entered_sleep.wait(), timeout=1)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    compose.assert_awaited_once()
+    assert snapshots == [
+        {
+            "expected_control_updated_at": control_updated_at,
+            "expected_paused": False,
+            "running": False,
+            "enabled": True,
+            "activity": "Authoritative portfolio synchronization failed to start",
+            "interval_seconds": 5,
+            "error_type": "ValueError",
+            "stats": {"lease_held": False, "ready": False, "degraded": True},
+        }
+    ]
+
+
 @pytest.mark.db
 @pytest.mark.asyncio
 async def test_unleased_contender_does_not_retract_current_owner_snapshot_during_composition():
