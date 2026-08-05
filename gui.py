@@ -231,6 +231,7 @@ FRONTEND_PORT = 5173
 # trading plane and starving the wallet-state reseeder.  See the
 # ``discovery`` plane comment in ``backend/workers/host.py``.
 _WORKER_PLANES = (
+    ("KALSHI PORTFOLIO", "kalshi_portfolio"),
     ("WORKERS", "trading"),
     ("NEWS", "news"),
     ("DISCOVERY", "discovery"),
@@ -267,7 +268,11 @@ _WORKER_PLANES = (
     ("JOBS", "jobs"),
 )
 _WORKER_SOURCE_TAG_BY_PLANE = {pn: st for st, pn in _WORKER_PLANES}
+_WORKER_ENTRYPOINT_BY_PLANE = {
+    "kalshi_portfolio": "workers.kalshi_portfolio_host",
+}
 _WORKER_PLANE_BY_NAME: dict[str, str] = {
+    "kalshi_portfolio_sync": "kalshi_portfolio",
     "scanner": "detection", "scanner_slo": "detection",
     "market_universe": "detection", "search_index": "detection",
     "events": "detection",
@@ -325,6 +330,7 @@ _WORKER_SHORT_NAMES: dict[str, str] = {
 }
 
 WORKER_STATUS_ORDER: list[tuple[str, str]] = [
+    ("kalshi_portfolio_sync", "KALSHI PORTFOLIO"),
     ("scanner", "SCANNER"), ("scanner_slo", "SCANNER SLO"),
     ("discovery", "DISCOVERY"), ("weather", "WEATHER"),
     ("news", "NEWS"), ("crypto", "CRYPTO"),
@@ -334,6 +340,7 @@ WORKER_STATUS_ORDER: list[tuple[str, str]] = [
 ]
 
 WORKER_TAG_TO_NAME: dict[str, str] = {
+    "KALSHI PORTFOLIO": "kalshi_portfolio_sync",
     "SCANNER": "scanner", "SCANNER SLO": "scanner_slo",
     "DISCOVERY": "discovery", "WEATHER": "weather",
     "NEWS": "news", "CRYPTO": "crypto",
@@ -343,6 +350,7 @@ WORKER_TAG_TO_NAME: dict[str, str] = {
 }
 
 WORKER_BACKEND_HINTS: tuple[tuple[str, str], ...] = (
+    ("kalshi_portfolio_sync", "kalshi_portfolio_sync"),
     ("scanner", "scanner"), ("scanner_slo", "scanner_slo"),
     ("discovery", "discovery"), ("weather", "weather"),
     ("news_worker", "news"), ("crypto_worker", "crypto"),
@@ -1852,8 +1860,12 @@ class CallistoApp:
                 )
             else:
                 spawn_kwargs["preexec_fn"] = lambda: os.nice(10)
+        worker_entrypoint = _WORKER_ENTRYPOINT_BY_PLANE.get(plane_name, "workers.host")
+        worker_command = [str(self._venv_python_path()), "-m", worker_entrypoint]
+        if worker_entrypoint == "workers.host":
+            worker_command.append(plane_name)
         worker_proc = subprocess.Popen(
-            [str(self._venv_python_path()), "-m", "workers.host", plane_name],
+            worker_command,
             cwd=str(BACKEND_DIR), stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
             env=env,
             **spawn_kwargs,

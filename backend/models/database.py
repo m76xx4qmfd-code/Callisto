@@ -3321,6 +3321,174 @@ class KalshiPortfolioCoverageCheckpoint(Base):
     )
 
 
+class KalshiPortfolioCoverageOrderMembership(Base):
+    """Exact canonical order observation selected by one coverage attempt."""
+
+    __tablename__ = "kalshi_portfolio_coverage_order_memberships"
+
+    principal_fingerprint = Column(String(64), primary_key=True)
+    coverage_id = Column(String, primary_key=True)
+    order_id = Column(String, primary_key=True)
+    evidence_hash = Column(String(64), nullable=False)
+
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["principal_fingerprint", "coverage_id"],
+            [
+                "kalshi_portfolio_coverage_checkpoints.principal_fingerprint",
+                "kalshi_portfolio_coverage_checkpoints.coverage_id",
+            ],
+            name="fk_kalshi_coverage_order_membership_checkpoint",
+            deferrable=True,
+            initially="DEFERRED",
+        ),
+        ForeignKeyConstraint(
+            ["principal_fingerprint", "order_id", "evidence_hash"],
+            [
+                "kalshi_portfolio_order_observations.principal_fingerprint",
+                "kalshi_portfolio_order_observations.order_id",
+                "kalshi_portfolio_order_observations.evidence_hash",
+            ],
+            name="fk_kalshi_coverage_order_membership_observation",
+        ),
+        CheckConstraint("principal_fingerprint ~ '^[0-9a-f]{64}$'", name="ck_kalshi_coverage_order_member_principal"),
+        CheckConstraint("length(btrim(coverage_id)) > 0", name="ck_kalshi_coverage_order_member_coverage"),
+        CheckConstraint("length(btrim(order_id)) > 0", name="ck_kalshi_coverage_order_member_order"),
+        CheckConstraint("evidence_hash ~ '^[0-9a-f]{64}$'", name="ck_kalshi_coverage_order_member_hash"),
+    )
+
+
+class KalshiPortfolioCoverageFillMembership(Base):
+    """Exact canonical fill observation selected by one coverage attempt."""
+
+    __tablename__ = "kalshi_portfolio_coverage_fill_memberships"
+
+    principal_fingerprint = Column(String(64), primary_key=True)
+    coverage_id = Column(String, primary_key=True)
+    fill_id = Column(String, primary_key=True)
+
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["principal_fingerprint", "coverage_id"],
+            [
+                "kalshi_portfolio_coverage_checkpoints.principal_fingerprint",
+                "kalshi_portfolio_coverage_checkpoints.coverage_id",
+            ],
+            name="fk_kalshi_coverage_fill_membership_checkpoint",
+            deferrable=True,
+            initially="DEFERRED",
+        ),
+        ForeignKeyConstraint(
+            ["principal_fingerprint", "fill_id"],
+            [
+                "kalshi_portfolio_fill_observations.principal_fingerprint",
+                "kalshi_portfolio_fill_observations.fill_id",
+            ],
+            name="fk_kalshi_coverage_fill_membership_observation",
+        ),
+        CheckConstraint("principal_fingerprint ~ '^[0-9a-f]{64}$'", name="ck_kalshi_coverage_fill_member_principal"),
+        CheckConstraint("length(btrim(coverage_id)) > 0", name="ck_kalshi_coverage_fill_member_coverage"),
+        CheckConstraint("length(btrim(fill_id)) > 0", name="ck_kalshi_coverage_fill_member_fill"),
+    )
+
+
+class KalshiPortfolioProjectionAttempt(Base):
+    """Immutable versioned portfolio projection attempt and component evidence."""
+
+    __tablename__ = "kalshi_portfolio_projection_attempts"
+
+    principal_fingerprint = Column(String(64), primary_key=True)
+    projection_id = Column(String, primary_key=True)
+    coverage_id = Column(String, nullable=True)
+    subaccount_number = Column(Integer, nullable=False)
+    status = Column(String, nullable=False)
+    reason = Column(String, nullable=False)
+    started_at = Column(DateTime, nullable=False)
+    completed_at = Column(DateTime, nullable=False)
+    coverage_observed_at = Column(DateTime, nullable=True)
+    positions_observed_at = Column(DateTime, nullable=True)
+    balance_observed_at = Column(DateTime, nullable=True)
+    settlements_observed_at = Column(DateTime, nullable=True)
+    component_skew_seconds = Column(Numeric(38, 6, asdecimal=True), nullable=True)
+    correctness_freshness_bound_seconds = Column(Numeric(38, 6, asdecimal=True), nullable=False)
+    evidence_hash = Column(String(64), nullable=True)
+    balance_json = Column(JSON, nullable=True)
+    positions_json = Column(JSON, nullable=True)
+    settlements_json = Column(JSON, nullable=True)
+    gaps_json = Column(JSON, nullable=False)
+    retry_allowed = Column(Boolean, nullable=False, default=False, server_default="false")
+
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["principal_fingerprint", "coverage_id"],
+            [
+                "kalshi_portfolio_coverage_checkpoints.principal_fingerprint",
+                "kalshi_portfolio_coverage_checkpoints.coverage_id",
+            ],
+            name="fk_kalshi_projection_attempt_coverage",
+            deferrable=True,
+            initially="DEFERRED",
+        ),
+        CheckConstraint("principal_fingerprint ~ '^[0-9a-f]{64}$'", name="ck_kalshi_projection_attempt_principal"),
+        CheckConstraint("status IN ('complete', 'incomplete', 'failed')", name="ck_kalshi_projection_attempt_status"),
+        CheckConstraint(
+            "(status = 'failed' AND coverage_id IS NULL) OR (status <> 'failed' AND coverage_id IS NOT NULL)",
+            name="ck_kalshi_projection_attempt_coverage_status",
+        ),
+        CheckConstraint("subaccount_number BETWEEN 0 AND 63", name="ck_kalshi_projection_attempt_subaccount"),
+        CheckConstraint("retry_allowed = false", name="ck_kalshi_projection_attempt_no_retry"),
+        CheckConstraint("correctness_freshness_bound_seconds > 0", name="ck_kalshi_projection_attempt_bound"),
+        Index("idx_kalshi_projection_attempt_completed", "completed_at"),
+    )
+
+
+class KalshiPortfolioProjectionHead(Base):
+    """Mutable principal head separating latest attempt from last healthy data."""
+
+    __tablename__ = "kalshi_portfolio_projection_heads"
+
+    principal_fingerprint = Column(String(64), primary_key=True)
+    latest_projection_id = Column(String, nullable=False)
+    healthy_projection_id = Column(String, nullable=True)
+    updated_at = Column(DateTime, nullable=False)
+
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["principal_fingerprint", "latest_projection_id"],
+            ["kalshi_portfolio_projection_attempts.principal_fingerprint", "kalshi_portfolio_projection_attempts.projection_id"],
+            name="fk_kalshi_projection_head_latest",
+            deferrable=True,
+            initially="DEFERRED",
+        ),
+        ForeignKeyConstraint(
+            ["principal_fingerprint", "healthy_projection_id"],
+            ["kalshi_portfolio_projection_attempts.principal_fingerprint", "kalshi_portfolio_projection_attempts.projection_id"],
+            name="fk_kalshi_projection_head_healthy",
+            deferrable=True,
+            initially="DEFERRED",
+        ),
+        CheckConstraint("principal_fingerprint ~ '^[0-9a-f]{64}$'", name="ck_kalshi_projection_head_principal"),
+    )
+
+
+class KalshiPortfolioProjectionLease(Base):
+    """Mutable principal-scoped worker lease with monotonically increasing fence."""
+
+    __tablename__ = "kalshi_portfolio_projection_leases"
+
+    principal_fingerprint = Column(String(64), primary_key=True)
+    owner_id = Column(String, nullable=False)
+    fence_token = Column(BigInteger, nullable=False)
+    expires_at = Column(DateTime, nullable=False)
+    updated_at = Column(DateTime, nullable=False)
+
+    __table_args__ = (
+        CheckConstraint("principal_fingerprint ~ '^[0-9a-f]{64}$'", name="ck_kalshi_projection_lease_principal"),
+        CheckConstraint("length(btrim(owner_id)) > 0", name="ck_kalshi_projection_lease_owner"),
+        CheckConstraint("fence_token > 0", name="ck_kalshi_projection_lease_fence"),
+    )
+
+
 def _register_immutable_ledger_table(table) -> None:  # noqa: ANN001
     _sa_event.listen(
         table,
@@ -3429,6 +3597,41 @@ def _register_execution_event_validation(table) -> None:
     )
 
 
+def _register_projection_head_validation(table) -> None:  # noqa: ANN001
+    _sa_event.listen(
+        table,
+        "after_create",
+        DDL(
+            """
+            CREATE OR REPLACE FUNCTION validate_kalshi_projection_healthy_head()
+            RETURNS trigger AS $$
+            BEGIN
+                IF NEW.healthy_projection_id IS NOT NULL AND NOT EXISTS (
+                    SELECT 1
+                    FROM kalshi_portfolio_projection_attempts
+                    WHERE principal_fingerprint = NEW.principal_fingerprint
+                      AND projection_id = NEW.healthy_projection_id
+                      AND status = 'complete'
+                ) THEN
+                    RAISE EXCEPTION 'healthy projection must reference a complete attempt';
+                END IF;
+                RETURN NEW;
+            END;
+            $$ LANGUAGE plpgsql
+            """
+        ),
+    )
+    _sa_event.listen(
+        table,
+        "after_create",
+        DDL(
+            "CREATE TRIGGER trg_kalshi_projection_healthy_head_validate "
+            "BEFORE INSERT OR UPDATE OF healthy_projection_id ON kalshi_portfolio_projection_heads "
+            "FOR EACH ROW EXECUTE FUNCTION validate_kalshi_projection_healthy_head()"
+        ),
+    )
+
+
 _register_immutable_ledger_table(VenueOrderIntentRecord.__table__)
 _register_immutable_ledger_table(VenueExecutionEvent.__table__)
 _register_immutable_ledger_table(VenueProviderAcknowledgementRecord.__table__)
@@ -3436,8 +3639,12 @@ _register_immutable_ledger_table(KalshiPortfolioOrderIdentity.__table__)
 _register_immutable_ledger_table(KalshiPortfolioOrderObservation.__table__)
 _register_immutable_ledger_table(KalshiPortfolioFillObservation.__table__)
 _register_immutable_ledger_table(KalshiPortfolioCoverageCheckpoint.__table__)
+_register_immutable_ledger_table(KalshiPortfolioCoverageOrderMembership.__table__)
+_register_immutable_ledger_table(KalshiPortfolioCoverageFillMembership.__table__)
+_register_immutable_ledger_table(KalshiPortfolioProjectionAttempt.__table__)
 _register_acknowledgement_validation(VenueProviderAcknowledgementRecord.__table__)
 _register_execution_event_validation(VenueExecutionEvent.__table__)
+_register_projection_head_validation(KalshiPortfolioProjectionHead.__table__)
 
 
 # ==================== SHARED STATE (DB AS SINGLE SOURCE OF TRUTH) ====================

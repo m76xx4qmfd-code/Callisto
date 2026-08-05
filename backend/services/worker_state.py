@@ -76,7 +76,9 @@ DEFAULT_WORKER_INTERVALS: dict[str, int] = {
     "redeemer": 120,
     "discovery": 3600,
     "events": 300,
+    "kalshi_portfolio_sync": 5,
 }
+DEFAULT_DISABLED_WORKERS = frozenset({"kalshi_portfolio_sync"})
 DB_RETRY_ATTEMPTS = 3
 DB_RETRY_BASE_DELAY_SECONDS = 0.05
 DB_RETRY_MAX_DELAY_SECONDS = 0.3
@@ -745,13 +747,14 @@ async def ensure_worker_control(
     worker_name: str,
     *,
     default_interval: Optional[int] = None,
+    default_enabled: bool = True,
 ) -> WorkerControl:
     result = await session.execute(select(WorkerControl).where(WorkerControl.worker_name == worker_name))
     row = result.scalar_one_or_none()
     if row is None:
         row = WorkerControl(
             worker_name=worker_name,
-            is_enabled=True,
+            is_enabled=bool(default_enabled),
             is_paused=False,
             interval_seconds=int(default_interval or _default_interval(worker_name)),
             requested_run_at=None,
@@ -768,13 +771,14 @@ async def read_worker_control(
     worker_name: str,
     *,
     default_interval: Optional[int] = None,
+    default_enabled: bool = True,
 ) -> dict[str, Any]:
     result = await session.execute(select(WorkerControl).where(WorkerControl.worker_name == worker_name))
     row = result.scalar_one_or_none()
     if row is None:
         return {
             "worker_name": worker_name,
-            "is_enabled": True,
+            "is_enabled": bool(default_enabled),
             "is_paused": False,
             "interval_seconds": int(default_interval or _default_interval(worker_name)),
             "requested_run_at": None,
@@ -794,8 +798,10 @@ async def set_worker_paused(
     session: AsyncSession,
     worker_name: str,
     paused: bool,
+    *,
+    default_enabled: bool = True,
 ) -> None:
-    row = await ensure_worker_control(session, worker_name)
+    row = await ensure_worker_control(session, worker_name, default_enabled=default_enabled)
     row.is_paused = bool(paused)
     row.updated_at = _now()
     await session.commit()
@@ -811,7 +817,7 @@ async def set_worker_enabled(
     Distinct from set_worker_paused (is_paused, transient): the generic worker
     loops gate on ``(not enabled or paused)``, so a disabled worker idles across
     restarts and global resume-all until explicitly re-enabled."""
-    row = await ensure_worker_control(session, worker_name)
+    row = await ensure_worker_control(session, worker_name, default_enabled=bool(enabled))
     row.is_enabled = bool(enabled)
     row.updated_at = _now()
     await session.commit()
@@ -821,22 +827,34 @@ async def set_worker_interval(
     session: AsyncSession,
     worker_name: str,
     interval_seconds: int,
+    *,
+    default_enabled: bool = True,
 ) -> None:
-    row = await ensure_worker_control(session, worker_name)
+    row = await ensure_worker_control(session, worker_name, default_enabled=default_enabled)
     row.interval_seconds = max(1, min(86400, int(interval_seconds)))
     row.updated_at = _now()
     await session.commit()
 
 
-async def request_worker_run(session: AsyncSession, worker_name: str) -> None:
-    row = await ensure_worker_control(session, worker_name)
+async def request_worker_run(
+    session: AsyncSession,
+    worker_name: str,
+    *,
+    default_enabled: bool = True,
+) -> None:
+    row = await ensure_worker_control(session, worker_name, default_enabled=default_enabled)
     row.requested_run_at = _now()
     row.updated_at = _now()
     await session.commit()
 
 
-async def clear_worker_run_request(session: AsyncSession, worker_name: str) -> None:
-    row = await ensure_worker_control(session, worker_name)
+async def clear_worker_run_request(
+    session: AsyncSession,
+    worker_name: str,
+    *,
+    default_enabled: bool = True,
+) -> None:
+    row = await ensure_worker_control(session, worker_name, default_enabled=default_enabled)
     row.requested_run_at = None
     row.updated_at = _now()
     await session.commit()
@@ -1022,7 +1040,11 @@ async def read_worker_snapshot(
     result = await session.execute(select(WorkerSnapshot).where(WorkerSnapshot.worker_name == worker_name))
     row = result.scalar_one_or_none()
     if row is None:
-        control = await read_worker_control(session, worker_name)
+        control = await read_worker_control(
+            session,
+            worker_name,
+            default_enabled=worker_name not in DEFAULT_DISABLED_WORKERS,
+        )
         return {
             "worker_name": worker_name,
             "running": False,

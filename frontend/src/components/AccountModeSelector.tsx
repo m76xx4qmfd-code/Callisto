@@ -5,7 +5,7 @@ import { useQuery } from '@tanstack/react-query'
 import { Shield, Zap, ChevronDown, DollarSign, BarChart3, Check } from 'lucide-react'
 import { cn } from '../lib/utils'
 import { accountModeAtom, selectedAccountIdAtom } from '../store/atoms'
-import { getKalshiBalance, getKalshiStatus, getSimulationAccounts, getTradingBalance, getTradingStatus } from '../services/api'
+import { getSimulationAccounts, getTradingBalance, getTradingStatus } from '../services/api'
 
 export default function AccountModeSelector() {
   const { t } = useTranslation()
@@ -30,20 +30,6 @@ export default function AccountModeSelector() {
     queryKey: ['trading-balance'],
     queryFn: getTradingBalance,
     enabled: open && polymarketReady,
-    refetchInterval: open ? 15000 : false,
-    retry: false,
-  })
-  const { data: kalshiStatus } = useQuery({
-    queryKey: ['kalshi-status'],
-    queryFn: getKalshiStatus,
-    enabled: open,
-    refetchInterval: open ? 10000 : false,
-    retry: false,
-  })
-  const { data: kalshiBalance } = useQuery({
-    queryKey: ['kalshi-balance'],
-    queryFn: getKalshiBalance,
-    enabled: open && Boolean(kalshiStatus?.authenticated),
     refetchInterval: open ? 15000 : false,
     retry: false,
   })
@@ -88,7 +74,7 @@ export default function AccountModeSelector() {
   const isLive = selectedAccountId?.startsWith('live:')
   const livePlatform = isLive ? selectedAccountId?.replace('live:', '') : null
   const polymarketBalanceValue = polymarketBalance?.balance ?? 0
-  const kalshiBalanceValue = kalshiBalance?.balance ?? kalshiStatus?.balance?.balance ?? 0
+
   const formatBalance = (value: number | null | undefined) => (
     `$${(value ?? 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
   )
@@ -205,7 +191,7 @@ export default function AccountModeSelector() {
             </div>
             <div className="flex-1 min-w-0">
               <div className="text-sm text-foreground">Kalshi</div>
-              <div className="text-xs text-muted-foreground font-mono">{formatBalance(kalshiBalanceValue)}</div>
+              <div className="text-xs text-muted-foreground">Authoritative evidence in Accounts</div>
             </div>
             {selectedAccountId === 'live:kalshi' && (
               <Check className="w-3.5 h-3.5 text-green-400 shrink-0" />

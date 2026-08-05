@@ -13,6 +13,7 @@ import hashlib
 import json
 import math
 import re
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -26,9 +27,12 @@ from sqlalchemy.orm import sessionmaker
 
 from models.database import (
     KalshiPortfolioCoverageCheckpoint,
+    KalshiPortfolioCoverageFillMembership,
+    KalshiPortfolioCoverageOrderMembership,
     KalshiPortfolioFillObservation,
     KalshiPortfolioOrderIdentity,
     KalshiPortfolioOrderObservation,
+    KalshiPortfolioProjectionLease,
     VenueExecutionEvent,
     VenueOrderIntentRecord,
     VenueProviderAcknowledgementRecord,
@@ -44,6 +48,10 @@ from services.venues.kalshi_v2 import (
 
 class KalshiPortfolioCoverageConflictError(RuntimeError):
     """Evidence or caller-stable identity conflicted and no checkpoint was committed."""
+
+
+class KalshiPortfolioCoverageLeaseError(RuntimeError):
+    """A fenced projection worker no longer owns portfolio evidence writes."""
 
 
 class KalshiPortfolioReadClient(Protocol):
@@ -107,9 +115,26 @@ _ORDER_IMMUTABLE_FIELDS = (
 
 
 class KalshiPortfolioCoverageService:
-    def __init__(self, session_factory: sessionmaker, client: KalshiPortfolioReadClient) -> None:
+    def __init__(
+        self,
+        session_factory: sessionmaker,
+        client: KalshiPortfolioReadClient,
+        *,
+        expected_lease_owner: str | None = None,
+        expected_fence_token: int | None = None,
+        now: Callable[[], datetime] | None = None,
+    ) -> None:
+        if (expected_lease_owner is None) != (expected_fence_token is None):
+            raise ValueError("coverage lease owner and fence token must be supplied together")
+        if expected_lease_owner is not None and (
+            not expected_lease_owner.strip() or int(expected_fence_token or 0) <= 0
+        ):
+            raise ValueError("coverage lease owner and fence token must be valid")
         self._session_factory = session_factory
         self._client = client
+        self._expected_lease_owner = expected_lease_owner.strip() if expected_lease_owner is not None else None
+        self._expected_fence_token = expected_fence_token
+        self._now = now or (lambda: datetime.now(timezone.utc))
 
     async def sweep(self, coverage_id: str, observed_at: datetime) -> KalshiPortfolioCoverageResult:
         principal_fingerprint = self._client.principal_fingerprint
@@ -239,6 +264,28 @@ class KalshiPortfolioCoverageService:
 
         try:
             async with self._session_factory() as session, session.begin():
+                if self._expected_lease_owner is not None:
+                    lease = await session.scalar(
+                        select(KalshiPortfolioProjectionLease)
+                        .where(KalshiPortfolioProjectionLease.principal_fingerprint == principal_fingerprint)
+                        .with_for_update()
+                    )
+                    guard_time = self._now()
+                    if guard_time.tzinfo is None:
+                        raise ValueError("coverage lease clock must be timezone-aware")
+                    if lease is None:
+                        raise KalshiPortfolioCoverageLeaseError("portfolio coverage lease fence changed or expired")
+                    lease_expiry = (
+                        lease.expires_at.replace(tzinfo=timezone.utc)
+                        if lease.expires_at.tzinfo is None
+                        else lease.expires_at.astimezone(timezone.utc)
+                    )
+                    if (
+                        lease.owner_id != self._expected_lease_owner
+                        or lease.fence_token != self._expected_fence_token
+                        or lease_expiry <= guard_time.astimezone(timezone.utc)
+                    ):
+                        raise KalshiPortfolioCoverageLeaseError("portfolio coverage lease fence changed or expired")
                 for order_id in sorted(orders):
                     order = orders[order_id]
                     await session.execute(
@@ -307,6 +354,23 @@ class KalshiPortfolioCoverageService:
                         raise KalshiPortfolioCoverageConflictError(
                             f"fill_id {fill_id!r} conflicts with durable fill evidence"
                         )
+                for order_id in sorted(orders):
+                    session.add(
+                        KalshiPortfolioCoverageOrderMembership(
+                            principal_fingerprint=principal_fingerprint,
+                            coverage_id=coverage_id,
+                            order_id=order_id,
+                            evidence_hash=order_hashes[order_id],
+                        )
+                    )
+                for fill_id in sorted(fills):
+                    session.add(
+                        KalshiPortfolioCoverageFillMembership(
+                            principal_fingerprint=principal_fingerprint,
+                            coverage_id=coverage_id,
+                            fill_id=fill_id,
+                        )
+                    )
                 session.add(_checkpoint_from_result(result, cutoff_before, cutoff_after))
                 await session.flush()
         except IntegrityError as exc:
@@ -321,7 +385,29 @@ class KalshiPortfolioCoverageService:
     async def _load_checkpoint(
         self, principal_fingerprint: str, coverage_id: str
     ) -> KalshiPortfolioCoverageCheckpoint | None:
-        async with self._session_factory() as session:
+        async with self._session_factory() as session, session.begin():
+            if self._expected_lease_owner is not None:
+                lease = await session.scalar(
+                    select(KalshiPortfolioProjectionLease)
+                    .where(KalshiPortfolioProjectionLease.principal_fingerprint == principal_fingerprint)
+                    .with_for_update()
+                )
+                guard_time = self._now()
+                if guard_time.tzinfo is None:
+                    raise ValueError("coverage lease clock must be timezone-aware")
+                if lease is None:
+                    raise KalshiPortfolioCoverageLeaseError("portfolio coverage lease fence changed or expired")
+                lease_expiry = (
+                    lease.expires_at.replace(tzinfo=timezone.utc)
+                    if lease.expires_at.tzinfo is None
+                    else lease.expires_at.astimezone(timezone.utc)
+                )
+                if (
+                    lease.owner_id != self._expected_lease_owner
+                    or lease.fence_token != self._expected_fence_token
+                    or lease_expiry <= guard_time.astimezone(timezone.utc)
+                ):
+                    raise KalshiPortfolioCoverageLeaseError("portfolio coverage lease fence changed or expired")
             return await session.get(
                 KalshiPortfolioCoverageCheckpoint,
                 {"principal_fingerprint": principal_fingerprint, "coverage_id": coverage_id},
@@ -522,8 +608,8 @@ def _order_payload(order: KalshiOrder) -> dict[str, object]:
         "created_time": order.created_time,
         "last_update_time": order.last_update_time,
         "expiration_time": order.expiration_time,
-        "subaccount_number": order.subaccount_number,
-        "exchange_index": order.exchange_index,
+        "subaccount_number": str(order.subaccount_number) if order.subaccount_number is not None else None,
+        "exchange_index": str(order.exchange_index) if order.exchange_index is not None else None,
     }
 
 
@@ -542,8 +628,8 @@ def _fill_payload(fill: KalshiFill) -> dict[str, object]:
         "is_taker": fill.is_taker,
         "fee_cost": _decimal_text(fill.fee_cost),
         "created_time": fill.created_time,
-        "subaccount_number": fill.subaccount_number,
-        "ts": fill.ts,
+        "subaccount_number": str(fill.subaccount_number) if fill.subaccount_number is not None else None,
+        "ts": str(fill.ts) if fill.ts is not None else None,
     }
 
 
