@@ -37,6 +37,12 @@ from .kalshi_v2_ws import (
     KalshiWSContinuityError,
     KalshiWSProtocolError,
 )
+from .kalshi_v2_ws_coordinator import (
+    KalshiV2WSCoordinator,
+    KalshiWSCoordinatorNoOp,
+    KalshiWSCoordinatorStarted,
+    KalshiWSCoordinatorTerminated,
+)
 from .kalshi_v2_ws_lifecycle import (
     KALSHI_V2_WS_URL,
     KalshiV2WSLifecycle,
@@ -85,10 +91,14 @@ __all__ = [
     "KalshiSubaccountBalance",
     "KalshiSubmissionUnknown",
     "KalshiV2Client",
+    "KalshiV2WSCoordinator",
     "KalshiV2WSFrameSession",
     "KalshiV2WSLifecycle",
     "KalshiWSConnectionInstructions",
     "KalshiWSContinuityError",
+    "KalshiWSCoordinatorNoOp",
+    "KalshiWSCoordinatorStarted",
+    "KalshiWSCoordinatorTerminated",
     "KalshiWSErrorResponse",
     "KalshiWSLifecycleError",
     "KalshiWSProtocolError",
