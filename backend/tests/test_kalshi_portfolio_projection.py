@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock
 import httpx
 import pytest
 from fastapi import FastAPI
-from sqlalchemy import select, update
+from sqlalchemy import select, text, update
 from sqlalchemy.exc import DBAPIError
 
 from api.routes_kalshi_portfolio import get_projection_reader, router
@@ -19,6 +19,7 @@ from models.database import (
     KalshiPortfolioCoverageOrderMembership,
     KalshiPortfolioProjectionAttempt,
     KalshiPortfolioProjectionHead,
+    KalshiPortfolioProjectionLease,
     WorkerControl,
     WorkerSnapshot,
 )
@@ -163,6 +164,8 @@ async def test_projection_exact_membership_fixed_point_empty_and_principal_isola
                         "degraded": False,
                         "retry_allowed": False,
                         "principal_fingerprint": principal,
+                        "lease_owner_id": "worker-a",
+                        "lease_fence_token": token,
                     },
                 )
             )
@@ -179,8 +182,56 @@ async def test_projection_exact_membership_fixed_point_empty_and_principal_isola
             "settlements": {"kind": "subaccount", "subaccount_numbers": [7]},
         }
         async with sf() as session, session.begin():
+            projection_lease = await session.get(KalshiPortfolioProjectionLease, principal)
+            assert projection_lease is not None
+            projection_lease.expires_at = NOW
+        lease_lost = await reader.read(principal)
+        assert lease_lost["readiness"] == "degraded"
+        assert lease_lost["reason"] == "private_sync_runtime_lease_lost"
+        assert lease_lost["sync_runtime"]["ready"] is False
+        async with sf() as session, session.begin():
+            projection_lease = await session.get(KalshiPortfolioProjectionLease, principal)
+            assert projection_lease is not None
+            projection_lease.expires_at = datetime.now(timezone.utc) + timedelta(days=1)
+        async with sf() as session, session.begin():
+            control = await session.get(WorkerControl, "kalshi_portfolio_sync")
+            worker_snapshot = await session.get(WorkerSnapshot, "kalshi_portfolio_sync")
+            assert control is not None and worker_snapshot is not None
+            control.is_paused = True
+        control_reader = KalshiPortfolioProjectionReader(
+            sf,
+            stale_after=timedelta(days=2),
+            now=lambda: datetime.now(timezone.utc),
+        )
+        paused = await control_reader.read(principal)
+        assert paused["readiness"] == "disabled"
+        assert paused["reason"] == "projection_worker_paused"
+        assert paused["sync_runtime"]["ready"] is False
+        async with sf() as session, session.begin():
+            control = await session.get(WorkerControl, "kalshi_portfolio_sync")
+            worker_snapshot = await session.get(WorkerSnapshot, "kalshi_portfolio_sync")
+            assert control is not None and worker_snapshot is not None
+            control.is_paused = False
+            worker_snapshot.running = False
+            worker_snapshot.updated_at = NOW
+        stopped = await control_reader.read(principal)
+        assert stopped["readiness"] == "degraded"
+        assert stopped["reason"] == "private_sync_runtime_not_running"
+        assert stopped["sync_runtime"]["ready"] is False
+        async with sf() as session, session.begin():
             worker_snapshot = await session.get(WorkerSnapshot, "kalshi_portfolio_sync")
             assert worker_snapshot is not None
+            worker_snapshot.running = True
+            worker_snapshot.enabled = False
+            worker_snapshot.updated_at = NOW
+        snapshot_disabled = await control_reader.read(principal)
+        assert snapshot_disabled["readiness"] == "degraded"
+        assert snapshot_disabled["reason"] == "private_sync_runtime_disabled"
+        assert snapshot_disabled["sync_runtime"]["ready"] is False
+        async with sf() as session, session.begin():
+            worker_snapshot = await session.get(WorkerSnapshot, "kalshi_portfolio_sync")
+            assert worker_snapshot is not None
+            worker_snapshot.enabled = True
             worker_snapshot.updated_at = NOW + timedelta(minutes=10)
         stale_snapshot = await KalshiPortfolioProjectionReader(
             sf, stale_after=timedelta(minutes=5), now=lambda: NOW + timedelta(minutes=10)
@@ -214,6 +265,72 @@ async def test_projection_exact_membership_fixed_point_empty_and_principal_isola
         assert first_unknown_activity["order_ids"] == ["unknown-first"]
         with pytest.raises(KalshiPortfolioPrincipalNotFoundError):
             await reader.read("e" * 64)
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.db
+@pytest.mark.asyncio
+async def test_authoritative_persistence_overrides_async_commit_deployment_default() -> None:
+    engine, sf = await build_postgres_session_factory(Base, "kalshi_projection_durable_commit")
+    try:
+        async with engine.begin() as connection:
+            database_name = await connection.scalar(text("SELECT current_database()"))
+            assert isinstance(database_name, str) and database_name.replace("_", "").isalnum()
+            await connection.execute(text(f'ALTER DATABASE "{database_name}" SET synchronous_commit = off'))
+            await connection.execute(text("SET synchronous_commit = off"))
+        async with engine.begin() as connection:
+            default_setting = await connection.scalar(text("SHOW synchronous_commit"))
+            assert default_setting == "off"
+            await connection.execute(
+                text("CREATE TABLE durability_probe (table_name TEXT NOT NULL, setting TEXT NOT NULL)")
+            )
+            await connection.execute(
+                text(
+                    """
+                    CREATE FUNCTION record_durability_setting() RETURNS trigger AS $$
+                    BEGIN
+                        INSERT INTO durability_probe(table_name, setting)
+                        VALUES (TG_TABLE_NAME, current_setting('synchronous_commit'));
+                        RETURN NEW;
+                    END;
+                    $$ LANGUAGE plpgsql
+                    """
+                )
+            )
+            for table_name in (
+                "kalshi_portfolio_projection_leases",
+                "kalshi_portfolio_coverage_checkpoints",
+                "kalshi_portfolio_projection_attempts",
+            ):
+                await connection.execute(
+                    text(
+                        f"CREATE TRIGGER durability_probe_insert AFTER INSERT ON {table_name} "
+                        "FOR EACH ROW EXECUTE FUNCTION record_durability_setting()"
+                    )
+                )
+
+        principal = "7" * 64
+        lease = KalshiPortfolioLeaseService(sf)
+        token = await lease.acquire(principal, "durability-worker", NOW, timedelta(minutes=1))
+        result = await KalshiPortfolioProjectionSynchronizer(
+            sf,
+            ProjectionClient(principal_fingerprint=principal),
+            subaccount=0,
+            expected_lease_owner="durability-worker",
+            expected_fence_token=token,
+            correctness_freshness_bound=timedelta(seconds=5),
+            now=lambda: NOW,
+        ).synchronize("durability-projection")
+        assert result.status == "complete"
+
+        async with sf() as session:
+            observations = dict((await session.execute(text("SELECT table_name, setting FROM durability_probe"))).all())
+        assert observations == {
+            "kalshi_portfolio_projection_leases": "on",
+            "kalshi_portfolio_coverage_checkpoints": "on",
+            "kalshi_portfolio_projection_attempts": "on",
+        }
     finally:
         await engine.dispose()
 
@@ -271,9 +388,7 @@ async def test_reader_surfaces_unprojected_coverage_as_degraded_safety_evidence(
             correctness_freshness_bound=timedelta(seconds=5),
             now=lambda: NOW,
         ).synchronize("healthy")
-        healthy_client.pages["orders"] = {
-            None: KalshiOrdersPage(orders=(_order(order_id="later-orphan"),), cursor="")
-        }
+        healthy_client.pages["orders"] = {None: KalshiOrdersPage(orders=(_order(order_id="later-orphan"),), cursor="")}
         healthy_client.cutoffs = [CUTOFF, CUTOFF]
         await KalshiPortfolioCoverageService(
             sf,

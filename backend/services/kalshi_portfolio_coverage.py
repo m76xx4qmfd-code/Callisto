@@ -20,7 +20,7 @@ from decimal import Decimal
 from fractions import Fraction
 from typing import Literal, Protocol
 
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import sessionmaker
@@ -264,6 +264,7 @@ class KalshiPortfolioCoverageService:
 
         try:
             async with self._session_factory() as session, session.begin():
+                await session.execute(text("SET LOCAL synchronous_commit = on"))
                 if self._expected_lease_owner is not None:
                     lease = await session.scalar(
                         select(KalshiPortfolioProjectionLease)

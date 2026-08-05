@@ -20,9 +20,15 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, cast
 
+from sqlalchemy import text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
-from models.database import AsyncSessionLocal, WorkerControl, WorkerSnapshot
+from models.database import (
+    AsyncSessionLocal,
+    KalshiPortfolioProjectionLease,
+    WorkerControl,
+    WorkerSnapshot,
+)
 
 WORKER_NAME = "kalshi_portfolio_sync"
 DEFAULT_CONTROL_POLL_SECONDS = 5
@@ -123,15 +129,44 @@ def _load_credential_config(environment: Mapping[str, str] | None = None) -> _Cr
 async def _persist_private_invalidation(
     session_factory: Any,
     principal_fingerprint: str,
+    expected_owner_id: str,
+    expected_fence_token: int,
     reason: str,
+    readiness_revision: int,
 ) -> None:
     """Retract durable readiness before private-frame recovery may publish again."""
     async with session_factory() as session, session.begin():
+        await session.execute(text("SET LOCAL synchronous_commit = on"))
+        lease = await session.get(
+            KalshiPortfolioProjectionLease,
+            principal_fingerprint,
+            with_for_update=True,
+        )
+        lease_expiry = (
+            lease.expires_at.replace(tzinfo=timezone.utc)
+            if lease is not None and lease.expires_at.tzinfo is None
+            else lease.expires_at.astimezone(timezone.utc)
+            if lease is not None
+            else None
+        )
+        if (
+            lease is None
+            or lease.owner_id != expected_owner_id
+            or lease.fence_token != expected_fence_token
+            or lease_expiry is None
+            or lease_expiry <= _utcnow()
+        ):
+            return
         snapshot = await session.get(WorkerSnapshot, WORKER_NAME, with_for_update=True)
         if snapshot is None:
             return
         stats = snapshot.stats_json if isinstance(snapshot.stats_json, dict) else {}
         if stats.get("principal_fingerprint") != principal_fingerprint:
+            return
+        previous_revision = stats.get("invalidation_revision", 0)
+        if not isinstance(previous_revision, int) or isinstance(previous_revision, bool):
+            previous_revision = 0
+        if readiness_revision < previous_revision:
             return
         snapshot.updated_at = _utcnow()
         snapshot.current_activity = "Authoritative portfolio synchronization invalidated"
@@ -141,6 +176,7 @@ async def _persist_private_invalidation(
             "ready": False,
             "degraded": True,
             "invalidation_reason": reason,
+            "invalidation_revision": readiness_revision,
         }
         await session.flush()
 
@@ -198,8 +234,16 @@ async def _compose_enabled_runtime(
             signer=signer,
             principal_origin=credentials.approved_origin,
         )
-        async def persist_invalidation(reason: str) -> None:
-            await _persist_private_invalidation(session_factory, principal, reason)
+
+        async def persist_invalidation(reason: str, readiness_revision: int) -> None:
+            await _persist_private_invalidation(
+                session_factory,
+                principal,
+                owner_id,
+                fence_token,
+                reason,
+                readiness_revision,
+            )
 
         runner = KalshiPrivateSyncRunner(
             lifecycle=lifecycle,
@@ -277,12 +321,162 @@ async def _write_snapshot(
         "stats_json": {"retry_allowed": False, **(stats or {})},
     }
     async with session_factory() as session, session.begin():
+        await session.execute(text("SET LOCAL synchronous_commit = on"))
         statement = pg_insert(WorkerSnapshot).values(**snapshot)
         statement = statement.on_conflict_do_update(
             index_elements=[WorkerSnapshot.worker_name],
             set_={key: value for key, value in snapshot.items() if key != "worker_name"},
         )
         await session.execute(statement)
+
+
+async def _write_runtime_snapshot(
+    session_factory: Any,
+    runner: Any,
+    principal_fingerprint: str,
+    expected_owner_id: str,
+    expected_fence_token: int,
+    *,
+    interval_seconds: int,
+    now: Callable[[], datetime] = _utcnow,
+) -> None:
+    async with session_factory() as session, session.begin():
+        await session.execute(text("SET LOCAL synchronous_commit = on"))
+        lease = await session.get(
+            KalshiPortfolioProjectionLease,
+            principal_fingerprint,
+            with_for_update=True,
+        )
+        checked_at = now()
+        if checked_at.tzinfo is None:
+            raise ValueError("runtime snapshot clock must be timezone-aware")
+        lease_expiry = (
+            lease.expires_at.replace(tzinfo=timezone.utc)
+            if lease is not None and lease.expires_at.tzinfo is None
+            else lease.expires_at.astimezone(timezone.utc)
+            if lease is not None
+            else None
+        )
+        if (
+            lease is None
+            or lease.owner_id != expected_owner_id
+            or lease.fence_token != expected_fence_token
+            or lease_expiry is None
+            or lease_expiry <= checked_at.astimezone(timezone.utc)
+        ):
+            raise LeaseLostError("principal projection lease was lost before runtime health persistence")
+        snapshot = await session.get(WorkerSnapshot, WORKER_NAME, with_for_update=True)
+        existing_stats = snapshot.stats_json if snapshot is not None and isinstance(snapshot.stats_json, dict) else {}
+        invalidation_revision = existing_stats.get("invalidation_revision", 0)
+        if not isinstance(invalidation_revision, int) or isinstance(invalidation_revision, bool):
+            invalidation_revision = 0
+        readiness_revision = getattr(runner, "readiness_revision", 0)
+        if not isinstance(readiness_revision, int) or isinstance(readiness_revision, bool):
+            readiness_revision = 0
+        ready = bool(getattr(runner, "ready", False)) and readiness_revision > invalidation_revision
+        degraded_reason = getattr(runner, "degraded_reason", None)
+        stats = {
+            "retry_allowed": False,
+            "lease_held": True,
+            "ready": ready,
+            "degraded": not ready or bool(degraded_reason),
+            "principal_fingerprint": principal_fingerprint,
+            "lease_owner_id": expected_owner_id,
+            "lease_fence_token": expected_fence_token,
+            "readiness_revision": readiness_revision,
+        }
+        if not ready and invalidation_revision:
+            stats["invalidation_revision"] = invalidation_revision
+            if isinstance(existing_stats.get("invalidation_reason"), str):
+                stats["invalidation_reason"] = existing_stats["invalidation_reason"]
+        values = {
+            "updated_at": _utcnow(),
+            "last_run_at": None,
+            "running": True,
+            "enabled": True,
+            "current_activity": (
+                "Authoritative portfolio synchronized" if ready else "Authoritative portfolio synchronization active"
+            ),
+            "interval_seconds": interval_seconds,
+            "lag_seconds": None,
+            "last_error": None,
+            "stats_json": stats,
+        }
+        if snapshot is None:
+            session.add(WorkerSnapshot(worker_name=WORKER_NAME, **values))
+        else:
+            for key, value in values.items():
+                setattr(snapshot, key, value)
+        await session.flush()
+
+
+async def _write_generation_snapshot(
+    session_factory: Any,
+    principal_fingerprint: str,
+    expected_owner_id: str,
+    expected_fence_token: int,
+    *,
+    running: bool,
+    enabled: bool,
+    activity: str,
+    interval_seconds: int,
+    last_run_at: datetime | None = None,
+    error_type: str | None = None,
+    degraded: bool,
+    now: Callable[[], datetime] = _utcnow,
+) -> bool:
+    async with session_factory() as session, session.begin():
+        await session.execute(text("SET LOCAL synchronous_commit = on"))
+        lease = await session.get(
+            KalshiPortfolioProjectionLease,
+            principal_fingerprint,
+            with_for_update=True,
+        )
+        checked_at = now()
+        if checked_at.tzinfo is None:
+            raise ValueError("generation snapshot clock must be timezone-aware")
+        lease_expiry = (
+            lease.expires_at.replace(tzinfo=timezone.utc)
+            if lease is not None and lease.expires_at.tzinfo is None
+            else lease.expires_at.astimezone(timezone.utc)
+            if lease is not None
+            else None
+        )
+        if (
+            lease is None
+            or lease.owner_id != expected_owner_id
+            or lease.fence_token != expected_fence_token
+            or lease_expiry is None
+            or lease_expiry <= checked_at.astimezone(timezone.utc)
+        ):
+            return False
+        values = {
+            "updated_at": _utcnow(),
+            "last_run_at": last_run_at,
+            "running": running,
+            "enabled": enabled,
+            "current_activity": activity,
+            "interval_seconds": interval_seconds,
+            "lag_seconds": None,
+            "last_error": error_type,
+            "stats_json": {
+                "retry_allowed": False,
+                "lease_held": running,
+                "ready": False,
+                "degraded": degraded,
+                "principal_fingerprint": principal_fingerprint,
+                "lease_owner_id": expected_owner_id,
+                "lease_fence_token": expected_fence_token,
+            },
+        }
+        snapshot = await session.get(WorkerSnapshot, WORKER_NAME, with_for_update=True)
+        if snapshot is None:
+            session.add(WorkerSnapshot(worker_name=WORKER_NAME, **values))
+        else:
+            for key, value in values.items():
+                setattr(snapshot, key, value)
+        await session.flush()
+        return True
 
 
 async def _run_enabled_generation(
@@ -323,22 +517,14 @@ async def _run_enabled_generation(
                     reason = "lease_lost"
                     raise LeaseLostError("principal projection lease was lost")
                 last_renewed = monotonic_now
-            await _write_snapshot(
+            await _write_runtime_snapshot(
                 session_factory,
-                running=True,
-                enabled=True,
-                activity=(
-                    "Authoritative portfolio synchronized"
-                    if bool(getattr(runtime.runner, "ready", False))
-                    else "Authoritative portfolio synchronization active"
-                ),
+                runtime.runner,
+                runtime.principal_fingerprint,
+                runtime.owner_id,
+                runtime.fence_token,
                 interval_seconds=max(1, int(poll_seconds)),
-                stats={
-                    "lease_held": True,
-                    "ready": bool(getattr(runtime.runner, "ready", False)),
-                    "degraded": bool(getattr(runtime.runner, "degraded_reason", None)),
-                    "principal_fingerprint": runtime.principal_fingerprint,
-                },
+                now=now,
             )
     finally:
         await _cancel_and_await(runner_task)
@@ -374,28 +560,21 @@ async def start_loop(
         runtime: EnabledRuntime | None = None
         last_run_at: datetime | None = None
         try:
-            await _write_snapshot(
-                session_factory,
-                running=False,
-                enabled=True,
-                activity="Initializing authoritative portfolio synchronization",
-                interval_seconds=interval,
-                stats={"lease_held": False, "ready": False, "degraded": True},
-            )
             runtime = await compose(session_factory, owner, now=now)
-            await _write_snapshot(
+            generation_published = await _write_generation_snapshot(
                 session_factory,
+                runtime.principal_fingerprint,
+                runtime.owner_id,
+                runtime.fence_token,
                 running=True,
                 enabled=True,
                 activity="Authoritative portfolio synchronization active",
                 interval_seconds=interval,
-                stats={
-                    "lease_held": True,
-                    "ready": False,
-                    "degraded": True,
-                    "principal_fingerprint": runtime.principal_fingerprint,
-                },
+                degraded=True,
+                now=now,
             )
+            if not generation_published:
+                raise LeaseLostError("principal projection lease was lost before generation start")
             reason = await _run_enabled_generation(
                 runtime,
                 session_factory=session_factory,
@@ -404,28 +583,37 @@ async def start_loop(
                 sleep=sleep,
             )
             last_run_at = now()
-            await _write_snapshot(
+            await _write_generation_snapshot(
                 session_factory,
+                runtime.principal_fingerprint,
+                runtime.owner_id,
+                runtime.fence_token,
                 running=False,
                 enabled=reason not in {"disabled", "paused"},
                 activity={"disabled": "Disabled", "paused": "Paused"}.get(reason, "Synchronization stopped"),
                 interval_seconds=interval,
                 last_run_at=last_run_at,
-                stats={"lease_held": False, "ready": False, "degraded": reason not in {"disabled", "paused"}},
+                degraded=reason not in {"disabled", "paused"},
+                now=now,
             )
         except asyncio.CancelledError:
             raise
         except Exception as exc:  # noqa: BLE001 - errors are redacted to type-only worker health.
-            await _write_snapshot(
-                session_factory,
-                running=False,
-                enabled=True,
-                activity="Authoritative portfolio synchronization degraded",
-                interval_seconds=interval,
-                last_run_at=last_run_at,
-                error_type=type(exc).__name__,
-                stats={"lease_held": False, "ready": False, "degraded": True},
-            )
+            if runtime is not None:
+                await _write_generation_snapshot(
+                    session_factory,
+                    runtime.principal_fingerprint,
+                    runtime.owner_id,
+                    runtime.fence_token,
+                    running=False,
+                    enabled=True,
+                    activity="Authoritative portfolio synchronization degraded",
+                    interval_seconds=interval,
+                    last_run_at=last_run_at,
+                    error_type=type(exc).__name__,
+                    degraded=True,
+                    now=now,
+                )
         finally:
             if runtime is not None:
                 with suppress(Exception):

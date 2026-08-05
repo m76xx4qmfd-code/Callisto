@@ -20,7 +20,7 @@ if str(BACKEND_ROOT) not in sys.path:
     sys.path.insert(0, str(BACKEND_ROOT))
 
 from api import routes_workers
-from models.database import Base, KalshiPortfolioProjectionLease, WorkerSnapshot
+from models.database import Base, KalshiPortfolioProjectionLease, WorkerControl, WorkerSnapshot
 from services import worker_state
 from services.kalshi_portfolio_projection import (
     KalshiPortfolioLeaseService,
@@ -86,6 +86,73 @@ async def test_missing_or_disabled_worker_never_touches_credentials_paths_import
     assert snapshots[0]["enabled"] is False
     assert snapshots[0]["activity"] == "Disabled"
     assert sys.modules.get("services.venues.kalshi_v2_ws_transport") is transport_module_before
+
+
+@pytest.mark.db
+@pytest.mark.asyncio
+async def test_unleased_contender_does_not_retract_current_owner_snapshot_during_composition():
+    engine, session_factory = await build_postgres_session_factory(Base, "kalshi_worker_fresh_generation")
+    task = None
+    try:
+        principal = "e" * 64
+        now = datetime.now(timezone.utc)
+        async with session_factory() as session, session.begin():
+            session.add(
+                WorkerControl(
+                    worker_name=worker.WORKER_NAME,
+                    is_enabled=True,
+                    is_paused=False,
+                    interval_seconds=5,
+                    requested_run_at=None,
+                    updated_at=now,
+                )
+            )
+            session.add(
+                WorkerSnapshot(
+                    worker_name=worker.WORKER_NAME,
+                    updated_at=now,
+                    running=True,
+                    enabled=True,
+                    current_activity="Authoritative portfolio synchronized",
+                    interval_seconds=5,
+                    stats_json={
+                        "retry_allowed": False,
+                        "ready": True,
+                        "degraded": False,
+                        "principal_fingerprint": principal,
+                    },
+                )
+            )
+
+        composition_started = asyncio.Event()
+        release_composition = asyncio.Event()
+
+        async def blocked_compose(*_args, **_kwargs):
+            composition_started.set()
+            await release_composition.wait()
+            raise AssertionError("test composition must remain blocked")
+
+        task = asyncio.create_task(
+            worker.start_loop(
+                session_factory=session_factory,
+                compose=blocked_compose,
+                owner_id="fresh-generation",
+            )
+        )
+        await asyncio.wait_for(composition_started.wait(), timeout=2)
+        async with session_factory() as session:
+            snapshot = await session.get(WorkerSnapshot, worker.WORKER_NAME)
+        assert snapshot is not None
+        assert snapshot.running is True
+        assert snapshot.current_activity == "Authoritative portfolio synchronized"
+        assert snapshot.stats_json["ready"] is True
+        assert snapshot.stats_json["degraded"] is False
+    finally:
+        if task is not None:
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+        await engine.dispose()
 
 
 @pytest.mark.asyncio
@@ -261,7 +328,14 @@ async def test_private_invalidation_immediately_retracts_durable_readiness():
     engine, session_factory = await build_postgres_session_factory(Base, "kalshi_worker_private_invalidation")
     try:
         principal = "c" * 64
-        now = datetime(2026, 8, 4, 12, tzinfo=timezone.utc)
+        now = datetime.now(timezone.utc)
+        owner_id = "private-invalidation-worker"
+        fence_token = await KalshiPortfolioLeaseService(session_factory).acquire(
+            principal,
+            owner_id,
+            now,
+            timedelta(minutes=1),
+        )
         async with session_factory() as session, session.begin():
             session.add(
                 WorkerSnapshot(
@@ -280,7 +354,14 @@ async def test_private_invalidation_immediately_retracts_durable_readiness():
                 )
             )
 
-        await worker._persist_private_invalidation(session_factory, principal, "private_frame")
+        await worker._persist_private_invalidation(
+            session_factory,
+            principal,
+            owner_id,
+            fence_token,
+            "private_frame",
+            2,
+        )
 
         async with session_factory() as session:
             snapshot = await session.get(WorkerSnapshot, worker.WORKER_NAME)
@@ -289,7 +370,147 @@ async def test_private_invalidation_immediately_retracts_durable_readiness():
         assert snapshot.stats_json["ready"] is False
         assert snapshot.stats_json["degraded"] is True
         assert snapshot.stats_json["invalidation_reason"] == "private_frame"
+        assert snapshot.stats_json["invalidation_revision"] == 2
         assert snapshot.stats_json["retry_allowed"] is False
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.db
+@pytest.mark.asyncio
+async def test_stale_ready_heartbeat_cannot_overwrite_committed_private_invalidation():
+    engine, session_factory = await build_postgres_session_factory(Base, "kalshi_worker_stale_heartbeat")
+    try:
+        principal = "d" * 64
+        owner_id = "stale-heartbeat-worker"
+        now = datetime.now(timezone.utc)
+        fence_token = await KalshiPortfolioLeaseService(session_factory).acquire(
+            principal,
+            owner_id,
+            now,
+            timedelta(minutes=1),
+        )
+        async with session_factory() as session, session.begin():
+            session.add(
+                WorkerSnapshot(
+                    worker_name=worker.WORKER_NAME,
+                    updated_at=datetime.now(timezone.utc),
+                    running=True,
+                    enabled=True,
+                    current_activity="Authoritative portfolio synchronization invalidated",
+                    interval_seconds=5,
+                    stats_json={
+                        "retry_allowed": False,
+                        "ready": False,
+                        "degraded": True,
+                        "principal_fingerprint": principal,
+                        "invalidation_reason": "private_frame",
+                        "invalidation_revision": 2,
+                    },
+                )
+            )
+
+        stale_runner = SimpleNamespace(ready=True, degraded_reason=None, readiness_revision=2)
+        await worker._write_runtime_snapshot(
+            session_factory,
+            stale_runner,
+            principal,
+            owner_id,
+            fence_token,
+            interval_seconds=5,
+        )
+        async with session_factory() as session:
+            invalidated = await session.get(WorkerSnapshot, worker.WORKER_NAME)
+        assert invalidated is not None
+        assert invalidated.stats_json["ready"] is False
+        assert invalidated.stats_json["invalidation_revision"] == 2
+
+        recovered_runner = SimpleNamespace(ready=True, degraded_reason=None, readiness_revision=3)
+        await worker._write_runtime_snapshot(
+            session_factory,
+            recovered_runner,
+            principal,
+            owner_id,
+            fence_token,
+            interval_seconds=5,
+        )
+        async with session_factory() as session:
+            recovered = await session.get(WorkerSnapshot, worker.WORKER_NAME)
+        assert recovered is not None
+        assert recovered.stats_json["ready"] is True
+        assert "invalidation_reason" not in recovered.stats_json
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.db
+@pytest.mark.asyncio
+async def test_stale_generation_teardown_cannot_overwrite_replacement_health():
+    engine, session_factory = await build_postgres_session_factory(Base, "kalshi_worker_stale_teardown")
+    try:
+        principal = "9" * 64
+        first_owner = "generation-a"
+        replacement_owner = "generation-b"
+        started_at = datetime.now(timezone.utc)
+        lease_service = KalshiPortfolioLeaseService(session_factory)
+        first_fence = await lease_service.acquire(
+            principal,
+            first_owner,
+            started_at,
+            timedelta(seconds=1),
+        )
+        assert (
+            await worker._write_runtime_snapshot(
+                session_factory,
+                SimpleNamespace(ready=True, degraded_reason=None, readiness_revision=1),
+                principal,
+                first_owner,
+                first_fence,
+                interval_seconds=5,
+                now=lambda: started_at,
+            )
+            is None
+        )
+
+        takeover_at = started_at + timedelta(seconds=2)
+        replacement_fence = await lease_service.acquire(
+            principal,
+            replacement_owner,
+            takeover_at,
+            timedelta(minutes=1),
+        )
+        await worker._write_runtime_snapshot(
+            session_factory,
+            SimpleNamespace(ready=True, degraded_reason=None, readiness_revision=1),
+            principal,
+            replacement_owner,
+            replacement_fence,
+            interval_seconds=5,
+            now=lambda: takeover_at,
+        )
+
+        stale_write = await worker._write_generation_snapshot(
+            session_factory,
+            principal,
+            first_owner,
+            first_fence,
+            running=False,
+            enabled=True,
+            activity="Authoritative portfolio synchronization degraded",
+            interval_seconds=5,
+            error_type="LeaseLostError",
+            degraded=True,
+            now=lambda: takeover_at,
+        )
+        assert stale_write is False
+        async with session_factory() as session:
+            snapshot = await session.get(WorkerSnapshot, worker.WORKER_NAME)
+        assert snapshot is not None
+        assert snapshot.running is True
+        assert snapshot.current_activity == "Authoritative portfolio synchronized"
+        assert snapshot.last_error is None
+        assert snapshot.stats_json["ready"] is True
+        assert snapshot.stats_json["principal_fingerprint"] == principal
     finally:
         await engine.dispose()
 
