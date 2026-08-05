@@ -170,7 +170,7 @@ class KalshiV2WSCoordinator:
         except asyncio.CancelledError:
             await self._abort_generation(candidate, "receive_cancelled")
             raise
-        except Exception:
+        except Exception:  # noqa: BLE001 - transport boundary must fail closed.
             return await self._abort_generation(candidate, "transport_receive_failed")
 
     async def disconnect(
@@ -214,7 +214,7 @@ class KalshiV2WSCoordinator:
                 return KalshiWSCoordinatorNoOp(generation=active.generation, reason="stale_generation")
             try:
                 outcome = self._session.receive(active.epoch_id, payload)
-            except Exception:
+            except Exception:  # noqa: BLE001 - decoded frames are untrusted input.
                 self._terminate_active_state(active, "malformed_decoded_frame")
                 terminal_outcome = KalshiWSCoordinatorTerminated(
                     generation=active.generation,
@@ -251,7 +251,7 @@ class KalshiV2WSCoordinator:
                 await self._abort_generation(active, "recovery_send_cancelled")
                 raise
             return KalshiWSCoordinatorNoOp(generation=active.generation, reason="stale_generation")
-        except Exception:
+        except Exception:  # noqa: BLE001 - transport boundary must fail closed.
             return await self._abort_generation(active, "transport_send_failed")
         finally:
             async with self._state_lock:
