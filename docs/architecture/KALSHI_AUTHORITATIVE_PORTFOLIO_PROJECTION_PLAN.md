@@ -1,6 +1,6 @@
 # Kalshi Authoritative Portfolio Projection Plan
 
-**Branch:** `callisto/kalshi-authoritative-projection`  
+**Branch:** `callisto/kalshi-authoritative-projection`
 **Date:** 2026-08-04
 
 ## Milestone context
