@@ -53,7 +53,7 @@ The request key is `(account_id, decision_id)`. A replay with the same canonical
 
 The final transaction locks the account row, revalidates both market and order-book source freshness plus the fee waiver at the commit timestamp, allocates the next sequence, inserts evidence, validates aggregate fills, and debits exact cash using 18-decimal scaled integers. Concurrent different decisions for one account serialize at the account row; concurrent identical first requests perform one read-only market-data evaluation and cannot double-debit.
 
-PostgreSQL enforces finite fixed-point scale and sign checks without model-added sizing caps, quantity and cash conservation, fill notional equality, contiguous fill sequences, parent/child aggregate equality, and immutable UPDATE/DELETE/TRUNCATE triggers. The migration has a real downgrade and is tested from the actual previous revision.
+PostgreSQL enforces finite fixed-point scale and sign checks without model-added sizing caps, quantity and cash conservation, fill notional equality, contiguous fill sequences, parent/child aggregate equality, deferred account/journal cash-chain validation, and immutable UPDATE/DELETE/TRUNCATE triggers. The migration's downgrade is a deliberate no-op — financial evidence tables are never dropped by policy — and the upgrade path is tested from the actual previous revision.
 
 ## Explicitly not included
 
