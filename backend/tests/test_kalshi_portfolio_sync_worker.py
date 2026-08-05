@@ -20,7 +20,12 @@ if str(BACKEND_ROOT) not in sys.path:
     sys.path.insert(0, str(BACKEND_ROOT))
 
 from api import routes_workers
-from models.database import Base, KalshiPortfolioProjectionLease, WorkerControl, WorkerSnapshot
+from models.database import (
+    Base,
+    KalshiPortfolioProjectionLease,
+    KalshiPortfolioRuntimeSnapshot,
+    WorkerControl,
+)
 from services import worker_state
 from services.kalshi_portfolio_projection import (
     KalshiPortfolioLeaseService,
@@ -57,7 +62,12 @@ async def test_missing_or_disabled_worker_never_touches_credentials_paths_import
     release_sleep = asyncio.Event()
 
     async def disabled_control(_session_factory):
-        return {"is_enabled": False, "is_paused": False, "interval_seconds": 5}
+        return {
+            "is_enabled": False,
+            "is_paused": False,
+            "interval_seconds": 5,
+            "updated_at": datetime.now(timezone.utc),
+        }
 
     async def snapshot(_session_factory, **kwargs):
         snapshots.append(kwargs)
@@ -108,8 +118,8 @@ async def test_unleased_contender_does_not_retract_current_owner_snapshot_during
                 )
             )
             session.add(
-                WorkerSnapshot(
-                    worker_name=worker.WORKER_NAME,
+                KalshiPortfolioRuntimeSnapshot(
+                    principal_fingerprint=principal,
                     updated_at=now,
                     running=True,
                     enabled=True,
@@ -141,7 +151,7 @@ async def test_unleased_contender_does_not_retract_current_owner_snapshot_during
         )
         await asyncio.wait_for(composition_started.wait(), timeout=2)
         async with session_factory() as session:
-            snapshot = await session.get(WorkerSnapshot, worker.WORKER_NAME)
+            snapshot = await session.get(KalshiPortfolioRuntimeSnapshot, principal)
         assert snapshot is not None
         assert snapshot.running is True
         assert snapshot.current_activity == "Authoritative portfolio synchronized"
@@ -338,8 +348,8 @@ async def test_private_invalidation_immediately_retracts_durable_readiness():
         )
         async with session_factory() as session, session.begin():
             session.add(
-                WorkerSnapshot(
-                    worker_name=worker.WORKER_NAME,
+                KalshiPortfolioRuntimeSnapshot(
+                    principal_fingerprint=principal,
                     updated_at=now,
                     running=True,
                     enabled=True,
@@ -364,7 +374,7 @@ async def test_private_invalidation_immediately_retracts_durable_readiness():
         )
 
         async with session_factory() as session:
-            snapshot = await session.get(WorkerSnapshot, worker.WORKER_NAME)
+            snapshot = await session.get(KalshiPortfolioRuntimeSnapshot, principal)
         assert snapshot is not None
         assert snapshot.current_activity == "Authoritative portfolio synchronization invalidated"
         assert snapshot.stats_json["ready"] is False
@@ -392,8 +402,8 @@ async def test_stale_ready_heartbeat_cannot_overwrite_committed_private_invalida
         )
         async with session_factory() as session, session.begin():
             session.add(
-                WorkerSnapshot(
-                    worker_name=worker.WORKER_NAME,
+                KalshiPortfolioRuntimeSnapshot(
+                    principal_fingerprint=principal,
                     updated_at=datetime.now(timezone.utc),
                     running=True,
                     enabled=True,
@@ -420,7 +430,7 @@ async def test_stale_ready_heartbeat_cannot_overwrite_committed_private_invalida
             interval_seconds=5,
         )
         async with session_factory() as session:
-            invalidated = await session.get(WorkerSnapshot, worker.WORKER_NAME)
+            invalidated = await session.get(KalshiPortfolioRuntimeSnapshot, principal)
         assert invalidated is not None
         assert invalidated.stats_json["ready"] is False
         assert invalidated.stats_json["invalidation_revision"] == 2
@@ -435,7 +445,7 @@ async def test_stale_ready_heartbeat_cannot_overwrite_committed_private_invalida
             interval_seconds=5,
         )
         async with session_factory() as session:
-            recovered = await session.get(WorkerSnapshot, worker.WORKER_NAME)
+            recovered = await session.get(KalshiPortfolioRuntimeSnapshot, principal)
         assert recovered is not None
         assert recovered.stats_json["ready"] is True
         assert "invalidation_reason" not in recovered.stats_json
@@ -504,7 +514,7 @@ async def test_stale_generation_teardown_cannot_overwrite_replacement_health():
         )
         assert stale_write is False
         async with session_factory() as session:
-            snapshot = await session.get(WorkerSnapshot, worker.WORKER_NAME)
+            snapshot = await session.get(KalshiPortfolioRuntimeSnapshot, principal)
         assert snapshot is not None
         assert snapshot.running is True
         assert snapshot.current_activity == "Authoritative portfolio synchronized"

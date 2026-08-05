@@ -25,8 +25,8 @@ from models.database import (
     KalshiPortfolioProjectionAttempt,
     KalshiPortfolioProjectionHead,
     KalshiPortfolioProjectionLease,
+    KalshiPortfolioRuntimeSnapshot,
     WorkerControl,
-    WorkerSnapshot,
 )
 from services.kalshi_portfolio_coverage import KalshiPortfolioCoverageService
 from services.venues.kalshi_v2 import KalshiPositionsPage, KalshiSettlementsPage
@@ -582,7 +582,7 @@ class KalshiPortfolioProjectionReader:
                 if requested_principal not in principals:
                     raise KalshiPortfolioPrincipalNotFoundError("Kalshi principal has no durable projection history")
                 principal = requested_principal
-            worker_snapshot = await session.get(WorkerSnapshot, "kalshi_portfolio_sync")
+            worker_snapshot = await session.get(KalshiPortfolioRuntimeSnapshot, principal)
             worker_stats = worker_snapshot.stats_json if worker_snapshot is not None else {}
             if not isinstance(worker_stats, dict):
                 worker_stats = {}

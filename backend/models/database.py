@@ -3489,6 +3489,27 @@ class KalshiPortfolioProjectionLease(Base):
     )
 
 
+class KalshiPortfolioRuntimeSnapshot(Base):
+    """Principal-scoped private-sync runtime health for authoritative reads."""
+
+    __tablename__ = "kalshi_portfolio_runtime_snapshots"
+
+    principal_fingerprint = Column(String(64), primary_key=True)
+    updated_at = Column(DateTime, nullable=False)
+    last_run_at = Column(DateTime, nullable=True)
+    running = Column(Boolean, nullable=False)
+    enabled = Column(Boolean, nullable=False)
+    current_activity = Column(String, nullable=True)
+    interval_seconds = Column(Integer, nullable=False)
+    lag_seconds = Column(Float, nullable=True)
+    last_error = Column(String, nullable=True)
+    stats_json = Column(JSON, nullable=False, default=dict)
+
+    __table_args__ = (
+        CheckConstraint("principal_fingerprint ~ '^[0-9a-f]{64}$'", name="ck_kalshi_runtime_snapshot_principal"),
+    )
+
+
 def _register_immutable_ledger_table(table) -> None:  # noqa: ANN001
     _sa_event.listen(
         table,

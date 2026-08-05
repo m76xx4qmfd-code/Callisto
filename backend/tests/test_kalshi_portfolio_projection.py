@@ -20,8 +20,8 @@ from models.database import (
     KalshiPortfolioProjectionAttempt,
     KalshiPortfolioProjectionHead,
     KalshiPortfolioProjectionLease,
+    KalshiPortfolioRuntimeSnapshot,
     WorkerControl,
-    WorkerSnapshot,
 )
 from services.kalshi_portfolio_coverage import KalshiPortfolioCoverageService
 from services.kalshi_portfolio_projection import (
@@ -152,8 +152,8 @@ async def test_projection_exact_membership_fixed_point_empty_and_principal_isola
                 )
             )
             session.add(
-                WorkerSnapshot(
-                    worker_name="kalshi_portfolio_sync",
+                KalshiPortfolioRuntimeSnapshot(
+                    principal_fingerprint=principal,
                     updated_at=NOW,
                     running=True,
                     enabled=True,
@@ -195,7 +195,7 @@ async def test_projection_exact_membership_fixed_point_empty_and_principal_isola
             projection_lease.expires_at = datetime.now(timezone.utc) + timedelta(days=1)
         async with sf() as session, session.begin():
             control = await session.get(WorkerControl, "kalshi_portfolio_sync")
-            worker_snapshot = await session.get(WorkerSnapshot, "kalshi_portfolio_sync")
+            worker_snapshot = await session.get(KalshiPortfolioRuntimeSnapshot, principal)
             assert control is not None and worker_snapshot is not None
             control.is_paused = True
         control_reader = KalshiPortfolioProjectionReader(
@@ -209,7 +209,7 @@ async def test_projection_exact_membership_fixed_point_empty_and_principal_isola
         assert paused["sync_runtime"]["ready"] is False
         async with sf() as session, session.begin():
             control = await session.get(WorkerControl, "kalshi_portfolio_sync")
-            worker_snapshot = await session.get(WorkerSnapshot, "kalshi_portfolio_sync")
+            worker_snapshot = await session.get(KalshiPortfolioRuntimeSnapshot, principal)
             assert control is not None and worker_snapshot is not None
             control.is_paused = False
             worker_snapshot.running = False
@@ -219,7 +219,7 @@ async def test_projection_exact_membership_fixed_point_empty_and_principal_isola
         assert stopped["reason"] == "private_sync_runtime_not_running"
         assert stopped["sync_runtime"]["ready"] is False
         async with sf() as session, session.begin():
-            worker_snapshot = await session.get(WorkerSnapshot, "kalshi_portfolio_sync")
+            worker_snapshot = await session.get(KalshiPortfolioRuntimeSnapshot, principal)
             assert worker_snapshot is not None
             worker_snapshot.running = True
             worker_snapshot.enabled = False
@@ -229,7 +229,7 @@ async def test_projection_exact_membership_fixed_point_empty_and_principal_isola
         assert snapshot_disabled["reason"] == "private_sync_runtime_disabled"
         assert snapshot_disabled["sync_runtime"]["ready"] is False
         async with sf() as session, session.begin():
-            worker_snapshot = await session.get(WorkerSnapshot, "kalshi_portfolio_sync")
+            worker_snapshot = await session.get(KalshiPortfolioRuntimeSnapshot, principal)
             assert worker_snapshot is not None
             worker_snapshot.enabled = True
             worker_snapshot.updated_at = NOW + timedelta(minutes=10)
@@ -241,6 +241,34 @@ async def test_projection_exact_membership_fixed_point_empty_and_principal_isola
         assert empty_snapshot["readiness"] == "degraded"
         assert empty_snapshot["reason"] == "private_sync_runtime_principal_mismatch"
         assert empty_snapshot["orders"] == [] and empty_snapshot["fills"] == []
+        async with sf() as session, session.begin():
+            session.add(
+                KalshiPortfolioRuntimeSnapshot(
+                    principal_fingerprint=other,
+                    updated_at=NOW,
+                    running=True,
+                    enabled=True,
+                    current_activity="Authoritative portfolio synchronized",
+                    interval_seconds=5,
+                    stats_json={
+                        "ready": True,
+                        "degraded": False,
+                        "retry_allowed": False,
+                        "principal_fingerprint": other,
+                        "lease_owner_id": "worker-b",
+                        "lease_fence_token": other_token,
+                    },
+                )
+            )
+        other_ready = await reader.read(other)
+        assert other_ready["readiness"] == "healthy"
+        other_runtime = other_ready["sync_runtime"]
+        assert isinstance(other_runtime, dict)
+        assert other_runtime["principal_matches"] is True
+        original_principal_after_other_ready = await reader.read(principal)
+        original_runtime = original_principal_after_other_ready["sync_runtime"]
+        assert isinstance(original_runtime, dict)
+        assert original_runtime["principal_matches"] is True
 
         no_healthy_principal = "c" * 64
         no_healthy_token = await lease.acquire(no_healthy_principal, "worker-c", NOW, timedelta(minutes=1))

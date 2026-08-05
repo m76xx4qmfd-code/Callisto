@@ -26,6 +26,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from models.database import (
     AsyncSessionLocal,
     KalshiPortfolioProjectionLease,
+    KalshiPortfolioRuntimeSnapshot,
     WorkerControl,
     WorkerSnapshot,
 )
@@ -157,7 +158,7 @@ async def _persist_private_invalidation(
             or lease_expiry <= _utcnow()
         ):
             return
-        snapshot = await session.get(WorkerSnapshot, WORKER_NAME, with_for_update=True)
+        snapshot = await session.get(KalshiPortfolioRuntimeSnapshot, principal_fingerprint, with_for_update=True)
         if snapshot is None:
             return
         stats = snapshot.stats_json if isinstance(snapshot.stats_json, dict) else {}
@@ -300,6 +301,8 @@ async def _read_control(session_factory: Any) -> dict[str, Any]:
 async def _write_snapshot(
     session_factory: Any,
     *,
+    expected_control_updated_at: datetime,
+    expected_paused: bool,
     running: bool,
     enabled: bool,
     activity: str,
@@ -307,7 +310,7 @@ async def _write_snapshot(
     last_run_at: datetime | None = None,
     error_type: str | None = None,
     stats: dict[str, Any] | None = None,
-) -> None:
+) -> bool:
     snapshot = {
         "worker_name": WORKER_NAME,
         "updated_at": _utcnow(),
@@ -322,12 +325,21 @@ async def _write_snapshot(
     }
     async with session_factory() as session, session.begin():
         await session.execute(text("SET LOCAL synchronous_commit = on"))
+        control = await session.get(WorkerControl, WORKER_NAME, with_for_update=True)
+        if (
+            control is None
+            or control.updated_at != expected_control_updated_at
+            or bool(control.is_enabled) != enabled
+            or bool(control.is_paused) != expected_paused
+        ):
+            return False
         statement = pg_insert(WorkerSnapshot).values(**snapshot)
         statement = statement.on_conflict_do_update(
             index_elements=[WorkerSnapshot.worker_name],
             set_={key: value for key, value in snapshot.items() if key != "worker_name"},
         )
         await session.execute(statement)
+        return True
 
 
 async def _write_runtime_snapshot(
@@ -365,7 +377,7 @@ async def _write_runtime_snapshot(
             or lease_expiry <= checked_at.astimezone(timezone.utc)
         ):
             raise LeaseLostError("principal projection lease was lost before runtime health persistence")
-        snapshot = await session.get(WorkerSnapshot, WORKER_NAME, with_for_update=True)
+        snapshot = await session.get(KalshiPortfolioRuntimeSnapshot, principal_fingerprint, with_for_update=True)
         existing_stats = snapshot.stats_json if snapshot is not None and isinstance(snapshot.stats_json, dict) else {}
         invalidation_revision = existing_stats.get("invalidation_revision", 0)
         if not isinstance(invalidation_revision, int) or isinstance(invalidation_revision, bool):
@@ -403,7 +415,7 @@ async def _write_runtime_snapshot(
             "stats_json": stats,
         }
         if snapshot is None:
-            session.add(WorkerSnapshot(worker_name=WORKER_NAME, **values))
+            session.add(KalshiPortfolioRuntimeSnapshot(principal_fingerprint=principal_fingerprint, **values))
         else:
             for key, value in values.items():
                 setattr(snapshot, key, value)
@@ -469,9 +481,9 @@ async def _write_generation_snapshot(
                 "lease_fence_token": expected_fence_token,
             },
         }
-        snapshot = await session.get(WorkerSnapshot, WORKER_NAME, with_for_update=True)
+        snapshot = await session.get(KalshiPortfolioRuntimeSnapshot, principal_fingerprint, with_for_update=True)
         if snapshot is None:
-            session.add(WorkerSnapshot(worker_name=WORKER_NAME, **values))
+            session.add(KalshiPortfolioRuntimeSnapshot(principal_fingerprint=principal_fingerprint, **values))
         else:
             for key, value in values.items():
                 setattr(snapshot, key, value)
@@ -546,14 +558,18 @@ async def start_loop(
         enabled = bool(control.get("is_enabled", False))
         paused = bool(control.get("is_paused", False))
         if not enabled or paused:
-            await _write_snapshot(
-                session_factory,
-                running=False,
-                enabled=enabled,
-                activity="Disabled" if not enabled else "Paused",
-                interval_seconds=interval,
-                stats={"lease_held": False, "ready": False, "degraded": False},
-            )
+            control_updated_at = control.get("updated_at")
+            if isinstance(control_updated_at, datetime):
+                await _write_snapshot(
+                    session_factory,
+                    expected_control_updated_at=control_updated_at,
+                    expected_paused=paused,
+                    running=False,
+                    enabled=enabled,
+                    activity="Disabled" if not enabled else "Paused",
+                    interval_seconds=interval,
+                    stats={"lease_held": False, "ready": False, "degraded": False},
+                )
             await sleep(min(interval, DEFAULT_CONTROL_POLL_SECONDS))
             continue
 
