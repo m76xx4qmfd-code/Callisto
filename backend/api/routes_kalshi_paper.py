@@ -10,9 +10,11 @@ from models.database import AsyncSessionLocal, async_engine
 from services.kalshi_paper_service import (
     KalshiPaperService,
     PaperAccountNotFound,
+    PaperCancellationConflict,
     PaperDecisionConflict,
     PaperOpportunityIneligible,
     PaperOpportunityNotFound,
+    PaperOrderNotCancelable,
 )
 from utils.retry import is_retryable_db_error
 
@@ -37,6 +39,7 @@ class PaperDecisionRequest(BaseModel):
     action: Literal["execute", "pass"]
     quantity: StrictStr | None = Field(default=None, min_length=1, max_length=80)
     limit_price: StrictStr | None = Field(default=None, min_length=1, max_length=80)
+    time_in_force: Literal["immediate_or_cancel", "good_till_canceled"] = "immediate_or_cancel"
 
     @model_validator(mode="after")
     def validate_action_shape(self) -> Self:
@@ -44,7 +47,17 @@ class PaperDecisionRequest(BaseModel):
             raise ValueError("execute decisions require quantity and limit_price")
         if self.action == "pass" and (self.quantity is not None or self.limit_price is not None):
             raise ValueError("pass decisions cannot include quantity or limit_price")
+        if self.action == "pass" and self.time_in_force != "immediate_or_cancel":
+            raise ValueError("pass decisions cannot be good_till_canceled")
         return self
+
+
+class PaperCancellationRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    account_id: StrictStr = Field(..., min_length=1, max_length=100)
+    order_id: StrictStr = Field(..., min_length=1, max_length=200)
+    cancellation_id: StrictStr = Field(..., min_length=1, max_length=200)
 
 
 def _handle_db_error(exc: OperationalError) -> None:
@@ -83,6 +96,16 @@ async def list_paper_decisions(account_id: str, limit: int = Query(default=50, g
         _handle_db_error(exc)
 
 
+@router.get("/accounts/{account_id}/orders")
+async def list_paper_orders(account_id: str, limit: int = Query(default=100, ge=1, le=500)):
+    try:
+        return await paper_service.list_orders(account_id=account_id, limit=limit)
+    except PaperAccountNotFound as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except OperationalError as exc:
+        _handle_db_error(exc)
+
+
 @router.get("/opportunities/{opportunity_id}/eligibility")
 async def get_paper_eligibility(opportunity_id: str):
     try:
@@ -106,12 +129,31 @@ async def record_paper_decision(request: PaperDecisionRequest):
             action=request.action,
             quantity=request.quantity,
             limit_price=request.limit_price,
+            time_in_force=request.time_in_force,
         )
     except PaperAccountNotFound as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except PaperOpportunityNotFound as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except (PaperDecisionConflict, PaperOpportunityIneligible) as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except OperationalError as exc:
+        _handle_db_error(exc)
+
+
+@router.post("/cancellations")
+async def cancel_paper_order(request: PaperCancellationRequest):
+    try:
+        return await paper_service.cancel_order(
+            account_id=request.account_id,
+            order_id=request.order_id,
+            cancellation_id=request.cancellation_id,
+        )
+    except PaperAccountNotFound as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except (PaperCancellationConflict, PaperOrderNotCancelable) as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc

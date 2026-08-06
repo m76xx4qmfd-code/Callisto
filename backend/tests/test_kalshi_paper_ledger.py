@@ -229,7 +229,7 @@ async def test_same_decision_replays_without_second_market_read_and_conflict_is_
             "limit_price": "0.600000",
         }
         first = await service.record_decision(**request)
-        second = await service.record_decision(**request)
+        second = await service.record_decision(**request, time_in_force="immediate_or_cancel")
         assert second == first
         assert market_data.fetch_quote.await_count == 1
 
@@ -541,7 +541,7 @@ async def test_database_rejects_mutation_truncation_and_excess_scale() -> None:
                     "INSERT INTO kalshi_paper_intents "
                     "SELECT account_id, 'forged-journal', request_hash, action, opportunity_id, "
                     "opportunity_stable_id, opportunity_revision, opportunity_snapshot_json, strategy_key, "
-                    "strategy_version, ticker, outcome, requested_quantity, limit_price, created_at "
+                    "strategy_version, ticker, outcome, time_in_force, requested_quantity, limit_price, created_at "
                     "FROM kalshi_paper_intents WHERE decision_id = 'guarded'"
                 )
             )
@@ -567,7 +567,7 @@ async def test_database_rejects_mutation_truncation_and_excess_scale() -> None:
                     "INSERT INTO kalshi_paper_intents "
                     "SELECT account_id, 'contradiction', request_hash, action, opportunity_id, "
                     "opportunity_stable_id, opportunity_revision, opportunity_snapshot_json, strategy_key, "
-                    "strategy_version, ticker, outcome, requested_quantity, limit_price, created_at "
+                    "strategy_version, ticker, outcome, time_in_force, requested_quantity, limit_price, created_at "
                     "FROM kalshi_paper_intents WHERE decision_id = 'guarded'"
                 )
             )
@@ -592,8 +592,8 @@ async def test_database_rejects_mutation_truncation_and_excess_scale() -> None:
                 await session.execute(
                     text(
                         "INSERT INTO kalshi_paper_accounts "
-                        "(id, name, currency, starting_cash, cash_balance, journal_sequence, created_at, updated_at) "
-                        "VALUES ('scale', 'Scale', 'USD', 1.0000000000000000001, 1, 0, now(), now())"
+                        "(id, name, currency, starting_cash, cash_balance, reserved_cash, journal_sequence, created_at, updated_at) "
+                        "VALUES ('scale', 'Scale', 'USD', 1.0000000000000000001, 1, 0, 0, now(), now())"
                     )
                 )
                 await session.commit()

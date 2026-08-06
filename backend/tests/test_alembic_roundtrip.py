@@ -167,23 +167,56 @@ async def test_head_migration_from_previous_revision_creates_paper_schema() -> N
 
         async with engine.connect() as conn:
 
-            def _upgrade_head(sync_conn) -> tuple[set[str], set[str], set[str], set[str], set[str]]:
+            def _upgrade_head(sync_conn):
                 cfg = _build_alembic_config(sync_conn)
-                command.stamp(cfg, previous_revision)
+                command.upgrade(cfg, previous_revision)
+                sync_conn.execute(
+                    text(
+                        "INSERT INTO kalshi_paper_accounts "
+                        "(id, name, currency, starting_cash, cash_balance, journal_sequence, created_at, updated_at) "
+                        "VALUES ('prior-account', 'Prior account', 'USD', 10, 10, 0, now(), now())"
+                    )
+                )
+                sync_conn.execute(
+                    text(
+                        "INSERT INTO kalshi_paper_intents "
+                        "(account_id, decision_id, request_hash, action, opportunity_id, opportunity_stable_id, "
+                        "opportunity_revision, opportunity_snapshot_json, strategy_key, strategy_version, ticker, "
+                        "outcome, requested_quantity, limit_price, created_at) VALUES "
+                        "('prior-account', 'prior-intent', :hash, 'execute', 'opp', 'stable', :hash, '{}', "
+                        "'basic', NULL, 'KXPRIOR', 'yes', 1, 0.5, now())"
+                    ),
+                    {"hash": "a" * 64},
+                )
+                sync_conn.commit()
                 command.upgrade(cfg, head_revision)
                 inspector = inspect(sync_conn)
                 tables = set(inspector.get_table_names())
                 intents = {column["name"] for column in inspector.get_columns("kalshi_paper_intents")}
                 decisions = {column["name"] for column in inspector.get_columns("kalshi_paper_decisions")}
                 fills = {column["name"] for column in inspector.get_columns("kalshi_paper_fills")}
+                accounts = {column["name"] for column in inspector.get_columns("kalshi_paper_accounts")}
+                orders = {column["name"] for column in inspector.get_columns("kalshi_paper_orders")}
+                cancellations = {column["name"] for column in inspector.get_columns("kalshi_paper_cancellations")}
+                events = {column["name"] for column in inspector.get_columns("kalshi_paper_order_events")}
                 decision_foreign_keys = {
                     foreign_key["name"] for foreign_key in inspector.get_foreign_keys("kalshi_paper_decisions")
                 }
-                return tables, intents, decisions, fills, decision_foreign_keys
+                event_foreign_keys = {
+                    foreign_key["name"] for foreign_key in inspector.get_foreign_keys("kalshi_paper_order_events")
+                }
+                order_indexes = {index["name"] for index in inspector.get_indexes("kalshi_paper_orders")}
+                event_indexes = {index["name"] for index in inspector.get_indexes("kalshi_paper_order_events")}
+                return (
+                    tables, intents, decisions, fills, accounts, orders, cancellations, events,
+                    decision_foreign_keys, event_foreign_keys, order_indexes, event_indexes,
+                )
 
-            tables, intent_columns, decision_columns, fill_columns, decision_foreign_keys = await conn.run_sync(
-                _upgrade_head
-            )
+            (
+                tables, intent_columns, decision_columns, fill_columns, account_columns,
+                order_columns, cancellation_columns, event_columns, decision_foreign_keys,
+                event_foreign_keys, order_indexes, event_indexes,
+            ) = await conn.run_sync(_upgrade_head)
             trigger_names = set(
                 (
                     await conn.execute(
@@ -192,7 +225,10 @@ async def test_head_migration_from_previous_revision_creates_paper_schema() -> N
                             "WHERE tgrelid IN ('kalshi_paper_accounts'::regclass, "
                             "'kalshi_paper_intents'::regclass, "
                             "'kalshi_paper_decisions'::regclass, "
-                            "'kalshi_paper_fills'::regclass) AND NOT tgisinternal"
+                            "'kalshi_paper_fills'::regclass, "
+                            "'kalshi_paper_orders'::regclass, "
+                            "'kalshi_paper_cancellations'::regclass, "
+                            "'kalshi_paper_order_events'::regclass) AND NOT tgisinternal"
                         )
                     )
                 ).scalars()
@@ -203,6 +239,9 @@ async def test_head_migration_from_previous_revision_creates_paper_schema() -> N
                 "kalshi_paper_intents",
                 "kalshi_paper_decisions",
                 "kalshi_paper_fills",
+                "kalshi_paper_orders",
+                "kalshi_paper_cancellations",
+                "kalshi_paper_order_events",
             }
             assert paper_tables <= tables
             assert {
@@ -211,6 +250,7 @@ async def test_head_migration_from_previous_revision_creates_paper_schema() -> N
                 "request_hash",
                 "opportunity_revision",
                 "opportunity_snapshot_json",
+                "time_in_force",
                 "requested_quantity",
                 "limit_price",
                 "created_at",
@@ -242,6 +282,17 @@ async def test_head_migration_from_previous_revision_creates_paper_schema() -> N
                 "source_side",
             } <= fill_columns
             assert "fk_kalshi_paper_decisions_intent" in decision_foreign_keys
+            assert "reserved_cash" in account_columns
+
+            assert {"order_id", "decision_id", "open_quantity", "decision_status", "reserved_cash"} <= order_columns
+            assert {"cancellation_id", "order_id", "released_cash", "status"} <= cancellation_columns
+            assert {"order_id", "sequence", "event_type", "cancellation_id"} <= event_columns
+            assert {
+                "fk_kalshi_paper_order_events_order",
+                "fk_kalshi_paper_order_events_cancellation",
+            } <= event_foreign_keys
+            assert "idx_kalshi_paper_orders_account_created" in order_indexes
+            assert "idx_kalshi_paper_order_events_cancel" in event_indexes
             assert {
                 "trg_kalshi_paper_intents_immutable",
                 "trg_kalshi_paper_intents_truncate_immutable",
@@ -253,6 +304,16 @@ async def test_head_migration_from_previous_revision_creates_paper_schema() -> N
                 "trg_kalshi_paper_fills_truncate_immutable",
                 "trg_kalshi_paper_fills_fill_aggregate",
                 "trg_kalshi_paper_accounts_validate_journal",
+                "trg_kalshi_paper_orders_immutable",
+                "trg_kalshi_paper_orders_truncate_immutable",
+                "trg_kalshi_paper_cancellations_immutable",
+                "trg_kalshi_paper_cancellations_truncate_immutable",
+                "trg_kalshi_paper_order_events_immutable",
+                "trg_kalshi_paper_order_events_truncate_immutable",
+                "trg_kalshi_paper_accounts_validate_order_lifecycle",
+                "trg_kalshi_paper_orders_validate_lifecycle",
+                "trg_kalshi_paper_cancellations_validate_lifecycle",
+                "trg_kalshi_paper_order_events_validate_lifecycle",
             } <= trigger_names
     finally:
         await engine.dispose()
