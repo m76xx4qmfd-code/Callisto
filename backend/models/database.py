@@ -3131,7 +3131,8 @@ class KalshiPaperIntent(Base):
         CheckConstraint(
             "(action = 'pass' AND time_in_force IS NULL "
             "AND requested_quantity IS NULL AND limit_price IS NULL) OR "
-            "(action = 'execute' AND (time_in_force IS NULL OR time_in_force = 'good_till_canceled') "
+            "(action = 'execute' AND (time_in_force IS NULL OR "
+            "time_in_force IN ('immediate_or_cancel', 'good_till_canceled')) "
             "AND requested_quantity <> 'NaN'::numeric "
             "AND requested_quantity < 'Infinity'::numeric AND requested_quantity > 0 "
             "AND scale(requested_quantity) <= 2 "

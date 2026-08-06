@@ -290,7 +290,8 @@ async def test_database_rejects_gtc_decision_forged_from_ioc_intent() -> None:
                     "INSERT INTO kalshi_paper_intents "
                     "SELECT account_id, 'forged-tif', :request_hash, action, opportunity_id, "
                     "opportunity_stable_id, opportunity_revision, opportunity_snapshot_json, strategy_key, "
-                    "strategy_version, ticker, outcome, time_in_force, requested_quantity, limit_price, created_at "
+                    "strategy_version, ticker, outcome, 'immediate_or_cancel', requested_quantity, limit_price, "
+                    "created_at "
                     "FROM kalshi_paper_intents WHERE decision_id = 'ioc-cause'"
                 ),
                 {"request_hash": forged_hash},
