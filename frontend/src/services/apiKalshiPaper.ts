@@ -6,6 +6,8 @@ export interface KalshiPaperAccount {
   currency: 'USD'
   starting_cash: string
   cash_balance: string
+  reserved_cash: string
+  available_cash: string
   journal_sequence: number
   created_at: string
   updated_at: string
@@ -47,7 +49,7 @@ export interface KalshiPaperDecision {
   event_ticker: string | null
   outcome: 'yes' | 'no'
   order_side: 'buy' | null
-  time_in_force: 'immediate_or_cancel' | null
+  time_in_force: 'immediate_or_cancel' | 'good_till_canceled' | null
   requested_quantity: string | null
   limit_price: string | null
   status: 'filled' | 'partial' | 'no_fill' | 'passed' | 'rejected'
@@ -59,6 +61,8 @@ export interface KalshiPaperDecision {
   fee: string
   cash_before: string
   cash_after: string
+  order_id: string | null
+  reserved_cash: string
   fill_formula_version: string
   fee_rule_version: string
   fee_provenance: Record<string, unknown>
@@ -77,6 +81,39 @@ export interface KalshiPaperDecisionInput {
   action: 'execute' | 'pass'
   quantity?: string
   limit_price?: string
+  time_in_force?: 'immediate_or_cancel' | 'good_till_canceled'
+}
+
+export interface KalshiPaperOrder {
+  account_id: string
+  order_id: string
+  decision_id: string
+  ticker: string
+  outcome: 'yes' | 'no'
+  side: 'buy'
+  time_in_force: 'good_till_canceled'
+  requested_quantity: string
+  filled_quantity: string
+  open_quantity: string
+  limit_price: string
+  reserved_cash: string
+  cancelable: boolean
+  status: 'open' | 'cancelled' | 'filled'
+  cancellation_id: string | null
+  later_matching_supported: false
+  created_at: string
+}
+
+export interface KalshiPaperCancellationInput {
+  account_id: string
+  order_id: string
+  cancellation_id: string
+}
+
+export interface KalshiPaperCancellation extends KalshiPaperCancellationInput {
+  status: 'cancelled'
+  released_cash: string
+  created_at: string
 }
 
 const DECIMAL_PATTERN = /^(?:0|[1-9]\d*)(?:\.\d+)?$/
@@ -129,6 +166,17 @@ function requireInteger(record: Record<string, unknown>, key: string, path: stri
   return value
 }
 
+function requireBoolean(record: Record<string, unknown>, key: string, path: string): boolean {
+  const value = record[key]
+  if (typeof value !== 'boolean') throw new Error(`Kalshi paper boolean is required at ${path}.${key}`)
+  return value
+}
+
+function rejectUnknownFields(record: Record<string, unknown>, allowed: readonly string[], path: string): void {
+  const unknown = Object.keys(record).find((key) => !allowed.includes(key))
+  if (unknown !== undefined) throw new Error(`Unknown Kalshi paper field at ${path}.${unknown}`)
+}
+
 function requireNullableInteger(record: Record<string, unknown>, key: string, path: string): number | null {
   const value = record[key]
   if (value !== null && (typeof value !== 'number' || !Number.isSafeInteger(value))) {
@@ -174,11 +222,17 @@ function requireNullableSha256(record: Record<string, unknown>, key: string, pat
 
 export function requireKalshiPaperAccount(value: unknown): KalshiPaperAccount {
   const account = requireObject(value, 'account')
+  rejectUnknownFields(account, [
+    'id', 'name', 'currency', 'starting_cash', 'cash_balance', 'reserved_cash', 'available_cash',
+    'journal_sequence', 'created_at', 'updated_at',
+  ], 'account')
   requireTextValue(account, 'id', 'account')
   requireTextValue(account, 'name', 'account')
   requireEnum(account, 'currency', ['USD'] as const, 'account')
   requireDecimalText(account, 'starting_cash', 'account')
   requireDecimalText(account, 'cash_balance', 'account')
+  requireDecimalText(account, 'reserved_cash', 'account')
+  requireDecimalText(account, 'available_cash', 'account')
   requireInteger(account, 'journal_sequence', 'account')
   requireTextValue(account, 'created_at', 'account')
   requireTextValue(account, 'updated_at', 'account')
@@ -201,6 +255,9 @@ export function requireKalshiPaperEligibility(value: unknown): KalshiPaperEligib
 
 function requireKalshiPaperFill(value: unknown, path: string): KalshiPaperFill {
   const fill = requireObject(value, path)
+  rejectUnknownFields(fill, [
+    'sequence', 'quantity', 'price', 'notional', 'fee', 'source_bid_price', 'source_side',
+  ], path)
   requireInteger(fill, 'sequence', path)
   requireDecimalText(fill, 'quantity', path)
   requireDecimalText(fill, 'price', path)
@@ -213,6 +270,15 @@ function requireKalshiPaperFill(value: unknown, path: string): KalshiPaperFill {
 
 export function requireKalshiPaperDecision(value: unknown): KalshiPaperDecision {
   const decision = requireObject(value, 'decision')
+  rejectUnknownFields(decision, [
+    'account_id', 'decision_id', 'account_sequence', 'action', 'opportunity_id',
+    'opportunity_stable_id', 'opportunity_revision', 'strategy_key', 'strategy_version', 'ticker',
+    'event_ticker', 'outcome', 'order_side', 'time_in_force', 'requested_quantity', 'limit_price',
+    'status', 'reason', 'filled_quantity', 'remaining_quantity', 'average_fill_price', 'notional',
+    'fee', 'cash_before', 'cash_after', 'order_id', 'reserved_cash', 'fill_formula_version',
+    'fee_rule_version', 'fee_provenance', 'market_evidence_hash', 'book_evidence_hash',
+    'opportunity_snapshot', 'fills', 'created_at',
+  ], 'decision')
   requireTextValue(decision, 'account_id', 'decision')
   requireTextValue(decision, 'decision_id', 'decision')
   requireInteger(decision, 'account_sequence', 'decision')
@@ -226,7 +292,7 @@ export function requireKalshiPaperDecision(value: unknown): KalshiPaperDecision 
   requireNullableTextValue(decision, 'event_ticker', 'decision')
   requireEnum(decision, 'outcome', ['yes', 'no'] as const, 'decision')
   requireNullableEnum(decision, 'order_side', ['buy'] as const, 'decision')
-  requireNullableEnum(decision, 'time_in_force', ['immediate_or_cancel'] as const, 'decision')
+  requireNullableEnum(decision, 'time_in_force', ['immediate_or_cancel', 'good_till_canceled'] as const, 'decision')
   requireNullableDecimalText(decision, 'requested_quantity', 'decision')
   requireNullableDecimalText(decision, 'limit_price', 'decision')
   requireEnum(decision, 'status', ['filled', 'partial', 'no_fill', 'passed', 'rejected'] as const, 'decision')
@@ -238,6 +304,8 @@ export function requireKalshiPaperDecision(value: unknown): KalshiPaperDecision 
   requireDecimalText(decision, 'fee', 'decision')
   requireDecimalText(decision, 'cash_before', 'decision')
   requireDecimalText(decision, 'cash_after', 'decision')
+  requireNullableTextValue(decision, 'order_id', 'decision')
+  requireDecimalText(decision, 'reserved_cash', 'decision')
   requireTextValue(decision, 'fill_formula_version', 'decision')
   requireTextValue(decision, 'fee_rule_version', 'decision')
   requireObject(decision.fee_provenance, 'decision.fee_provenance')
@@ -260,15 +328,78 @@ export function requireKalshiPaperDecisionInput(value: unknown): KalshiPaperDeci
   if (action === 'execute') {
     requireDecimalText(input, 'quantity', 'pending_attempt')
     requireDecimalText(input, 'limit_price', 'pending_attempt')
-  } else if (input.quantity !== undefined || input.limit_price !== undefined) {
-    throw new Error('Pass pending attempt cannot include quantity or limit_price')
+    if (input.time_in_force !== undefined) {
+      requireEnum(input, 'time_in_force', ['immediate_or_cancel', 'good_till_canceled'] as const, 'pending_attempt')
+    }
+  } else if (input.quantity !== undefined || input.limit_price !== undefined || input.time_in_force !== undefined) {
+    throw new Error('Pass pending attempt cannot include quantity, limit_price, or time_in_force')
   }
   const allowedKeys = action === 'execute'
-    ? new Set(['account_id', 'decision_id', 'opportunity_id', 'opportunity_revision', 'action', 'quantity', 'limit_price'])
+    ? new Set(['account_id', 'decision_id', 'opportunity_id', 'opportunity_revision', 'action', 'quantity', 'limit_price', 'time_in_force'])
     : new Set(['account_id', 'decision_id', 'opportunity_id', 'opportunity_revision', 'action'])
   const unknownKey = Object.keys(input).find((key) => !allowedKeys.has(key))
   if (unknownKey !== undefined) throw new Error(`Pending attempt contains unknown field ${unknownKey}`)
   return input as unknown as KalshiPaperDecisionInput
+}
+
+export function requireKalshiPaperOrder(value: unknown): KalshiPaperOrder {
+  const order = requireObject(value, 'order')
+  rejectUnknownFields(order, [
+    'account_id', 'order_id', 'decision_id', 'ticker', 'outcome', 'side', 'time_in_force',
+    'requested_quantity', 'filled_quantity', 'open_quantity', 'limit_price', 'reserved_cash',
+    'cancelable', 'status', 'cancellation_id', 'later_matching_supported', 'created_at',
+  ], 'order')
+  requireTextValue(order, 'account_id', 'order')
+  requireTextValue(order, 'order_id', 'order')
+  requireTextValue(order, 'decision_id', 'order')
+  requireTextValue(order, 'ticker', 'order')
+  requireEnum(order, 'outcome', ['yes', 'no'] as const, 'order')
+  requireEnum(order, 'side', ['buy'] as const, 'order')
+  requireEnum(order, 'time_in_force', ['good_till_canceled'] as const, 'order')
+  requireDecimalText(order, 'requested_quantity', 'order')
+  requireDecimalText(order, 'filled_quantity', 'order')
+  requireDecimalText(order, 'open_quantity', 'order')
+  requireDecimalText(order, 'limit_price', 'order')
+  requireDecimalText(order, 'reserved_cash', 'order')
+  requireBoolean(order, 'cancelable', 'order')
+  const status = requireEnum(order, 'status', ['open', 'cancelled', 'filled'] as const, 'order')
+  const cancellationId = requireNullableTextValue(order, 'cancellation_id', 'order')
+  if (order.later_matching_supported !== false) throw new Error('Kalshi paper later matching flag must be false')
+  if (
+    (status === 'open' && (order.cancelable !== true || cancellationId !== null))
+    || (status === 'cancelled' && (order.cancelable !== false || cancellationId === null))
+    || (status === 'filled' && (order.cancelable !== false || cancellationId !== null || order.open_quantity !== '0.00'))
+  ) {
+    throw new Error('Contradictory Kalshi paper order lifecycle')
+  }
+  requireTextValue(order, 'created_at', 'order')
+  return order as unknown as KalshiPaperOrder
+}
+
+export function requireKalshiPaperCancellationInput(value: unknown): KalshiPaperCancellationInput {
+  const input = requireObject(value, 'pending_cancellation')
+  requireTextValue(input, 'account_id', 'pending_cancellation')
+  requireTextValue(input, 'order_id', 'pending_cancellation')
+  requireTextValue(input, 'cancellation_id', 'pending_cancellation')
+  const unknownKey = Object.keys(input).find((key) => !['account_id', 'order_id', 'cancellation_id'].includes(key))
+  if (unknownKey !== undefined) throw new Error(`Pending cancellation contains unknown field ${unknownKey}`)
+  return input as unknown as KalshiPaperCancellationInput
+}
+
+export function requireKalshiPaperCancellation(value: unknown): KalshiPaperCancellation {
+  const cancellation = requireObject(value, 'cancellation')
+  rejectUnknownFields(cancellation, [
+    'account_id', 'order_id', 'cancellation_id', 'status', 'released_cash', 'created_at',
+  ], 'cancellation')
+  requireKalshiPaperCancellationInput({
+    account_id: cancellation.account_id,
+    order_id: cancellation.order_id,
+    cancellation_id: cancellation.cancellation_id,
+  })
+  requireEnum(cancellation, 'status', ['cancelled'] as const, 'cancellation')
+  requireDecimalText(cancellation, 'released_cash', 'cancellation')
+  requireTextValue(cancellation, 'created_at', 'cancellation')
+  return cancellation as unknown as KalshiPaperCancellation
 }
 
 export async function createKalshiPaperAccount(input: {
@@ -300,10 +431,48 @@ export async function getKalshiPaperDecisions(
   })
   const payload = unwrapApiData(data)
   if (!Array.isArray(payload)) throw new Error('Invalid Kalshi paper decisions payload')
-  return payload.map(requireKalshiPaperDecision)
+  const decisions = payload.map(requireKalshiPaperDecision)
+  if (decisions.some((decision) => decision.account_id !== accountId)) {
+    throw new Error('Kalshi paper decision account identity mismatch')
+  }
+  return decisions
 }
 
 export async function recordKalshiPaperDecision(input: KalshiPaperDecisionInput): Promise<KalshiPaperDecision> {
   const { data } = await api.post('/kalshi/paper/decisions', input)
-  return requireKalshiPaperDecision(unwrapApiData(data))
+  const decision = requireKalshiPaperDecision(unwrapApiData(data))
+  if (
+    decision.account_id !== input.account_id
+    || decision.decision_id !== input.decision_id
+    || decision.opportunity_id !== input.opportunity_id
+    || decision.opportunity_revision !== input.opportunity_revision
+    || decision.action !== input.action
+  ) {
+    throw new Error('Kalshi paper decision response identity mismatch')
+  }
+  return decision
+}
+
+export async function getKalshiPaperOrders(accountId: string, limit = 100): Promise<KalshiPaperOrder[]> {
+  const { data } = await api.get(`/kalshi/paper/accounts/${encodeURIComponent(accountId)}/orders`, { params: { limit } })
+  const payload = unwrapApiData(data)
+  if (!Array.isArray(payload)) throw new Error('Invalid Kalshi paper orders payload')
+  const orders = payload.map(requireKalshiPaperOrder)
+  if (orders.some((order) => order.account_id !== accountId)) {
+    throw new Error('Kalshi paper order account identity mismatch')
+  }
+  return orders
+}
+
+export async function cancelKalshiPaperOrder(input: KalshiPaperCancellationInput): Promise<KalshiPaperCancellation> {
+  const { data } = await api.post('/kalshi/paper/cancellations', input)
+  const cancellation = requireKalshiPaperCancellation(unwrapApiData(data))
+  if (
+    cancellation.account_id !== input.account_id
+    || cancellation.order_id !== input.order_id
+    || cancellation.cancellation_id !== input.cancellation_id
+  ) {
+    throw new Error('Kalshi paper cancellation response identity mismatch')
+  }
+  return cancellation
 }

@@ -6,20 +6,25 @@ import { Card, CardContent } from './ui/card'
 import { Input } from './ui/input'
 import { Badge } from './ui/badge'
 import {
+  cancelKalshiPaperOrder,
   createKalshiPaperAccount,
   getKalshiPaperAccounts,
   getKalshiPaperDecisions,
   getKalshiPaperEligibility,
+  getKalshiPaperOrders,
+  requireKalshiPaperCancellationInput,
   requireKalshiPaperDecisionInput,
   recordKalshiPaperDecision,
 } from '../services/apiKalshiPaper'
 import type {
+  KalshiPaperCancellationInput,
   KalshiPaperDecision,
   KalshiPaperDecisionInput,
   KalshiPaperEligibility,
 } from '../services/apiKalshiPaper'
 
 const PENDING_ATTEMPT_KEY = 'callisto:kalshi-paper:pending-attempt'
+const PENDING_CANCELLATION_KEY = 'callisto:kalshi-paper:pending-cancellation'
 
 function newDecisionId(): string {
   return `paper:${crypto.randomUUID()}`
@@ -31,7 +36,16 @@ function loadPendingAttempt(): KalshiPaperDecisionInput | null {
   try {
     return requireKalshiPaperDecisionInput(JSON.parse(stored))
   } catch {
-    localStorage.removeItem(PENDING_ATTEMPT_KEY)
+    return null
+  }
+}
+
+function loadPendingCancellation(): KalshiPaperCancellationInput | null {
+  const stored = localStorage.getItem(PENDING_CANCELLATION_KEY)
+  if (stored === null) return null
+  try {
+    return requireKalshiPaperCancellationInput(JSON.parse(stored))
+  } catch {
     return null
   }
 }
@@ -55,13 +69,19 @@ function statusTone(status: string): string {
 export default function KalshiPaperPanel() {
   const queryClient = useQueryClient()
   const [pendingAttempt, setPendingAttempt] = useState<KalshiPaperDecisionInput | null>(loadPendingAttempt)
-  const [selectedAccountId, setSelectedAccountId] = useState(pendingAttempt?.account_id ?? '')
+  const [pendingCancellation, setPendingCancellation] = useState<KalshiPaperCancellationInput | null>(loadPendingCancellation)
+  const [selectedAccountId, setSelectedAccountId] = useState(
+    pendingAttempt?.account_id ?? pendingCancellation?.account_id ?? '',
+  )
   const [accountName, setAccountName] = useState('Kalshi Paper')
   const [startingCash, setStartingCash] = useState('10000.00')
   const [opportunityId, setOpportunityId] = useState(pendingAttempt?.opportunity_id ?? '')
   const [eligibility, setEligibility] = useState<KalshiPaperEligibility | null>(null)
   const [quantity, setQuantity] = useState(pendingAttempt?.quantity ?? '1.00')
   const [limitPrice, setLimitPrice] = useState(pendingAttempt?.limit_price ?? '0.500000')
+  const [timeInForce, setTimeInForce] = useState<'immediate_or_cancel' | 'good_till_canceled'>(
+    pendingAttempt?.time_in_force ?? 'immediate_or_cancel',
+  )
   const [decisionId, setDecisionId] = useState(pendingAttempt?.decision_id ?? newDecisionId)
   const [lastDecision, setLastDecision] = useState<KalshiPaperDecision | null>(null)
 
@@ -82,18 +102,30 @@ export default function KalshiPaperPanel() {
     enabled: Boolean(activeAccountId),
     refetchInterval: 10000,
   })
+  const ordersQuery = useQuery({
+    queryKey: ['kalshi-paper-orders', activeAccountId],
+    queryFn: () => getKalshiPaperOrders(activeAccountId),
+    enabled: Boolean(activeAccountId),
+    refetchInterval: 10000,
+  })
 
   const createAccount = useMutation({
     mutationFn: () => createKalshiPaperAccount({ name: accountName, starting_cash: startingCash }),
     onSuccess: async (account) => {
-      if (loadPendingAttempt() === null) setSelectedAccountId(account.id)
+      if (
+        localStorage.getItem(PENDING_ATTEMPT_KEY) === null
+        && localStorage.getItem(PENDING_CANCELLATION_KEY) === null
+      ) setSelectedAccountId(account.id)
       await queryClient.invalidateQueries({ queryKey: ['kalshi-paper-accounts'] })
     },
   })
   const checkEligibility = useMutation({
     mutationFn: () => getKalshiPaperEligibility(opportunityId.trim()),
     onSuccess: (result) => {
-      if (loadPendingAttempt() !== null) return
+      if (
+        localStorage.getItem(PENDING_ATTEMPT_KEY) !== null
+        || localStorage.getItem(PENDING_CANCELLATION_KEY) !== null
+      ) return
       setEligibility(result)
       setDecisionId(newDecisionId())
     },
@@ -109,7 +141,7 @@ export default function KalshiPaperPanel() {
           opportunity_id: opportunityId.trim(),
           opportunity_revision: eligibility.opportunity_revision,
           action,
-          ...(action === 'execute' ? { quantity, limit_price: limitPrice } : {}),
+          ...(action === 'execute' ? { quantity, limit_price: limitPrice, time_in_force: timeInForce } : {}),
         }
         localStorage.setItem(PENDING_ATTEMPT_KEY, JSON.stringify(payload))
         setPendingAttempt(payload)
@@ -124,6 +156,30 @@ export default function KalshiPaperPanel() {
       ])
     },
   })
+  const cancelOrder = useMutation({
+    mutationFn: (orderId?: string) => {
+      let payload = pendingCancellation
+      if (payload === null) {
+        if (!activeAccountId || !orderId) throw new Error('An authoritative open order is required')
+        payload = {
+          account_id: activeAccountId,
+          order_id: orderId,
+          cancellation_id: `paper-cancel:${crypto.randomUUID()}`,
+        }
+        localStorage.setItem(PENDING_CANCELLATION_KEY, JSON.stringify(payload))
+        setPendingCancellation(payload)
+      }
+      return cancelKalshiPaperOrder(payload)
+    },
+    onSuccess: async () => {
+      localStorage.removeItem(PENDING_CANCELLATION_KEY)
+      setPendingCancellation(null)
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ['kalshi-paper-accounts'] }),
+        queryClient.invalidateQueries({ queryKey: ['kalshi-paper-orders', activeAccountId] }),
+      ])
+    },
+  })
 
   const startNewDecision = () => {
     localStorage.removeItem(PENDING_ATTEMPT_KEY)
@@ -133,8 +189,16 @@ export default function KalshiPaperPanel() {
     recordDecision.reset()
   }
   const attemptAction = pendingAttempt?.action ?? null
-  const inputFrozen = pendingAttempt !== null
-  const canEvaluate = Boolean(activeAccountId && eligibility && !accountsQuery.error) && !recordDecision.isPending
+  const unreadableRetryState = (
+    localStorage.getItem(PENDING_ATTEMPT_KEY) !== null && pendingAttempt === null
+  ) || (
+    localStorage.getItem(PENDING_CANCELLATION_KEY) !== null && pendingCancellation === null
+  )
+  const inputFrozen = pendingAttempt !== null || pendingCancellation !== null || unreadableRetryState
+  const authoritativeError = Boolean(accountsQuery.error || ordersQuery.error)
+  const canEvaluate = Boolean(activeAccountId && eligibility && !authoritativeError)
+    && !inputFrozen
+    && !recordDecision.isPending
 
   return (
     <div className="flex h-full min-h-0 flex-col gap-3 overflow-auto">
@@ -148,12 +212,19 @@ export default function KalshiPaperPanel() {
               It has no signer, credential input, venue order route, worker, or automatic startup behavior.
             </p>
             <p className="mt-1 text-xs text-amber-200">
-              Current scope is intentionally narrow: one active binary Kalshi market, buy-only IOC depth simulation,
-              and an active market-specific fee waiver. Unsupported fees fail closed.
+              Current scope is intentionally narrow: buy-only IOC or local GTC opening against one current depth
+              snapshot and an active market-specific fee waiver. GTC remainders do not match later.
             </p>
           </div>
         </div>
       </div>
+
+      {unreadableRetryState && (
+        <div className="rounded-lg border border-red-500/40 bg-red-500/10 p-3 text-xs text-red-200">
+          Persisted retry identity cannot be decoded. Financial actions and account switching remain frozen;
+          preserve browser storage for operator recovery.
+        </div>
+      )}
 
       <div className="grid gap-3 xl:grid-cols-[320px_minmax(0,1fr)]">
         <Card className="border-border bg-card/50 shadow-none">
@@ -164,6 +235,7 @@ export default function KalshiPaperPanel() {
             </div>
             {accounts.length > 0 && (
               <select
+                aria-label="Paper account"
                 value={activeAccountId}
                 disabled={inputFrozen}
                 onChange={(event) => setSelectedAccountId(event.target.value)}
@@ -177,8 +249,16 @@ export default function KalshiPaperPanel() {
             {activeAccount && (
               <div className="rounded-md border border-border/60 bg-background/60 p-2.5 text-xs">
                 <div className="flex justify-between gap-3">
-                  <span className="text-muted-foreground">Cash</span>
+                  <span className="text-muted-foreground">Settled cash</span>
                   <span className="font-mono">${activeAccount.cash_balance}</span>
+                </div>
+                <div className="mt-1 flex justify-between gap-3">
+                  <span className="text-muted-foreground">Reserved</span>
+                  <span className="font-mono">${activeAccount.reserved_cash}</span>
+                </div>
+                <div className="mt-1 flex justify-between gap-3">
+                  <span className="text-muted-foreground">Available</span>
+                  <span className="font-mono">${activeAccount.available_cash}</span>
                 </div>
                 <div className="mt-1 flex justify-between gap-3">
                   <span className="text-muted-foreground">Journal sequence</span>
@@ -252,25 +332,43 @@ export default function KalshiPaperPanel() {
                 <Input value={limitPrice} disabled={inputFrozen} onChange={(event) => setLimitPrice(event.target.value)} inputMode="decimal" />
               </div>
             </div>
+            <div>
+              <label className="mb-1 block text-[10px] uppercase tracking-wider text-muted-foreground">Time in force</label>
+              <select
+                aria-label="Time in force"
+                value={timeInForce}
+                disabled={inputFrozen}
+                onChange={(event) => setTimeInForce(event.target.value as typeof timeInForce)}
+                className="h-9 w-full rounded-md border border-input bg-background px-3 text-sm"
+              >
+                <option value="immediate_or_cancel">IOC — cancel any remainder immediately</option>
+                <option value="good_till_canceled">GTC — reserve local remainder until cancelled</option>
+              </select>
+            </div>
             <div className="rounded-md border border-border/60 bg-background/50 p-2 text-[10px] text-muted-foreground">
               Decision ID: <span className="break-all font-mono text-foreground">{decisionId}</span>
             </div>
             {attemptAction === null ? (
               <div className="flex flex-wrap gap-2">
                 <Button variant="outline" disabled={!canEvaluate} onClick={() => recordDecision.mutate('pass')}>Journal pass</Button>
-                <Button disabled={!canEvaluate || !quantity || !limitPrice} onClick={() => recordDecision.mutate('execute')}>Simulate buy IOC</Button>
+                <Button disabled={!canEvaluate || !quantity || !limitPrice} onClick={() => recordDecision.mutate('execute')}>
+                  Simulate buy {timeInForce === 'good_till_canceled' ? 'GTC' : 'IOC'}
+                </Button>
               </div>
             ) : (
               <div className="flex flex-wrap items-center gap-2">
                 {!lastDecision && (
-                  <Button disabled={recordDecision.isPending} onClick={() => recordDecision.mutate(attemptAction)}>
+                  <Button
+                    disabled={recordDecision.isPending || pendingCancellation !== null}
+                    onClick={() => recordDecision.mutate(attemptAction)}
+                  >
                     <RotateCcw className="mr-1.5 h-3.5 w-3.5" />
                     Retry same immutable decision
                   </Button>
                 )}
                 <Button
                   variant="outline"
-                  disabled={recordDecision.isPending || !lastDecision}
+                  disabled={pendingCancellation !== null || recordDecision.isPending || !lastDecision}
                   onClick={startNewDecision}
                 >
                   New decision
@@ -300,6 +398,81 @@ export default function KalshiPaperPanel() {
           </CardContent>
         </Card>
       </div>
+
+      <Card className="border-border bg-card/50 shadow-none">
+        <CardContent className="p-0">
+          <div className="border-b border-border/60 px-3 py-2.5">
+            <p className="text-sm font-medium">Authoritative local GTC orders</p>
+            <p className="text-[11px] text-muted-foreground">
+              Remainders are reserved locally and never receive later fills in this release.
+            </p>
+          </div>
+          {pendingCancellation && (
+            <div className="border-b border-amber-500/30 bg-amber-500/10 p-3 text-xs text-amber-200">
+              <p>Cancellation outcome unknown. Account switching and new actions remain frozen.</p>
+              <Button
+                className="mt-2"
+                size="sm"
+                disabled={cancelOrder.isPending}
+                onClick={() => cancelOrder.mutate(undefined)}
+              >
+                <RotateCcw className="mr-1.5 h-3.5 w-3.5" />
+                Retry same immutable cancellation
+              </Button>
+            </div>
+          )}
+          {cancelOrder.error && (
+            <p className="border-b border-red-500/30 bg-red-500/10 p-3 text-xs text-red-200">
+              {errorMessage(cancelOrder.error)} The same cancellation ID is retained for a safe retry.
+            </p>
+          )}
+          {ordersQuery.error ? (
+            <p className="p-4 text-xs text-amber-300">
+              Order refresh failed. Cached orders are hidden and cancellation is disabled until refresh recovers.
+            </p>
+          ) : (ordersQuery.data?.length ?? 0) === 0 ? (
+            <p className="p-6 text-center text-xs text-muted-foreground">No local GTC orders for this account.</p>
+          ) : (
+            <div className="overflow-auto">
+              <table className="w-full min-w-[760px] text-xs">
+                <thead className="border-b border-border/60 text-muted-foreground">
+                  <tr>
+                    <th className="px-3 py-2 text-left">Market</th>
+                    <th className="px-3 py-2 text-left">State</th>
+                    <th className="px-3 py-2 text-right">Open</th>
+                    <th className="px-3 py-2 text-right">Limit</th>
+                    <th className="px-3 py-2 text-right">Reserved</th>
+                    <th className="px-3 py-2 text-right">Action</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {(ordersQuery.data ?? []).map((order) => (
+                    <tr key={order.order_id} className="border-b border-border/40">
+                      <td className="px-3 py-2 font-mono">{order.ticker} {order.outcome.toUpperCase()}</td>
+                      <td className="px-3 py-2"><Badge variant="outline">{order.status}</Badge></td>
+                      <td className="px-3 py-2 text-right font-mono">{order.open_quantity}</td>
+                      <td className="px-3 py-2 text-right font-mono">${order.limit_price}</td>
+                      <td className="px-3 py-2 text-right font-mono">${order.reserved_cash}</td>
+                      <td className="px-3 py-2 text-right">
+                        {order.cancelable && (
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            disabled={inputFrozen || authoritativeError || cancelOrder.isPending}
+                            onClick={() => cancelOrder.mutate(order.order_id)}
+                          >
+                            Cancel remainder
+                          </Button>
+                        )}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </CardContent>
+      </Card>
 
       <Card className="min-h-[260px] border-border bg-card/50 shadow-none">
         <CardContent className="p-0">

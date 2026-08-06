@@ -7,8 +7,14 @@ from fastapi import HTTPException
 from pydantic import ValidationError
 
 from api import routes_kalshi_paper
-from api.routes_kalshi_paper import CreatePaperAccountRequest, PaperDecisionRequest
-from services.kalshi_paper_service import PaperAccountNotFound, PaperDecisionConflict, PaperOpportunityIneligible
+from api.routes_kalshi_paper import CreatePaperAccountRequest, PaperCancellationRequest, PaperDecisionRequest
+from services.kalshi_paper_service import (
+    PaperAccountNotFound,
+    PaperCancellationConflict,
+    PaperDecisionConflict,
+    PaperOpportunityIneligible,
+    PaperOrderNotCancelable,
+)
 
 
 def test_paper_decision_request_enforces_execute_and_pass_shapes() -> None:
@@ -98,3 +104,37 @@ async def test_decision_route_maps_conflict_and_ineligibility(monkeypatch) -> No
     with pytest.raises(HTTPException) as missing:
         await routes_kalshi_paper.record_paper_decision(request)
     assert missing.value.status_code == 404
+
+
+def test_gtc_and_cancellation_request_shapes_are_strict() -> None:
+    decision = PaperDecisionRequest(
+        account_id="account", decision_id="decision", opportunity_id="opportunity",
+        opportunity_revision="a" * 64, action="execute", quantity="1.00",
+        limit_price="0.500000", time_in_force="good_till_canceled",
+    )
+    assert decision.time_in_force == "good_till_canceled"
+    cancellation = PaperCancellationRequest(account_id="account", order_id="order", cancellation_id="cancel")
+    assert cancellation.order_id == "order"
+    with pytest.raises(ValidationError, match="extra_forbidden"):
+        PaperCancellationRequest.model_validate(
+            {"account_id": "account", "order_id": "order", "cancellation_id": "cancel", "extra": True}
+        )
+
+
+@pytest.mark.asyncio
+async def test_order_routes_delegate_and_map_terminal_conflicts(monkeypatch) -> None:
+    list_orders = AsyncMock(return_value=[{"order_id": "order"}])
+    monkeypatch.setattr(routes_kalshi_paper.paper_service, "list_orders", list_orders)
+    assert await routes_kalshi_paper.list_paper_orders("account", 25) == [{"order_id": "order"}]
+    list_orders.assert_awaited_once_with(account_id="account", limit=25)
+
+    request = PaperCancellationRequest(account_id="account", order_id="order", cancellation_id="cancel")
+    cancel = AsyncMock(side_effect=PaperOrderNotCancelable("terminal"))
+    monkeypatch.setattr(routes_kalshi_paper.paper_service, "cancel_order", cancel)
+    with pytest.raises(HTTPException) as terminal:
+        await routes_kalshi_paper.cancel_paper_order(request)
+    assert terminal.value.status_code == 409
+    cancel.side_effect = PaperCancellationConflict("id conflict")
+    with pytest.raises(HTTPException) as conflict:
+        await routes_kalshi_paper.cancel_paper_order(request)
+    assert conflict.value.status_code == 409

@@ -17,9 +17,12 @@ from sqlalchemy.orm import sessionmaker
 
 from models.database import (
     KalshiPaperAccount,
+    KalshiPaperCancellation,
     KalshiPaperDecision,
     KalshiPaperFill,
     KalshiPaperIntent,
+    KalshiPaperOrder,
+    KalshiPaperOrderEvent,
     OpportunityState,
 )
 from services.kalshi_paper_execution import (
@@ -37,6 +40,7 @@ from services.kalshi_paper_execution import (
 )
 
 Action = Literal["execute", "pass"]
+TimeInForce = Literal["immediate_or_cancel", "good_till_canceled"]
 _DECIMAL_PATTERN = re.compile(r"^(?:0|[1-9]\d*)(?:\.\d+)?$")
 _HASH_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 
@@ -54,6 +58,14 @@ class PaperOpportunityNotFound(LookupError):
 
 
 class PaperOpportunityIneligible(ValueError):
+    pass
+
+
+class PaperCancellationConflict(RuntimeError):
+    pass
+
+
+class PaperOrderNotCancelable(RuntimeError):
     pass
 
 
@@ -153,6 +165,7 @@ class KalshiPaperService:
             currency="USD",
             starting_cash=cash,
             cash_balance=cash,
+            reserved_cash=Decimal("0"),
             journal_sequence=0,
             created_at=now,
             updated_at=now,
@@ -197,6 +210,110 @@ class KalshiPaperService:
             ).scalars()
             return [await self._serialize_decision(session, decision) for decision in decisions]
 
+    async def list_orders(self, *, account_id: str, limit: int = 100) -> list[dict[str, object]]:
+        async with self._session_factory() as session:
+            if await session.get(KalshiPaperAccount, account_id) is None:
+                raise PaperAccountNotFound("paper account not found")
+            orders = (
+                await session.execute(
+                    select(KalshiPaperOrder)
+                    .where(KalshiPaperOrder.account_id == account_id)
+                    .order_by(KalshiPaperOrder.created_at.desc())
+                    .limit(limit)
+                )
+            ).scalars()
+            return [await self._serialize_order(session, order) for order in orders]
+
+    async def cancel_order(
+        self,
+        *,
+        account_id: str,
+        order_id: str,
+        cancellation_id: str,
+    ) -> dict[str, object]:
+        normalized_account_id = str(account_id or "").strip()
+        normalized_order_id = str(order_id or "").strip()
+        normalized_cancellation_id = str(cancellation_id or "").strip()
+        if not normalized_account_id or not normalized_order_id or not normalized_cancellation_id:
+            raise ValueError("account_id, order_id, and cancellation_id are required")
+
+        async with self._session_factory() as session, session.begin():
+            account = (
+                await session.execute(
+                    select(KalshiPaperAccount)
+                    .where(KalshiPaperAccount.id == normalized_account_id)
+                    .with_for_update()
+                    .execution_options(populate_existing=True)
+                )
+            ).scalar_one_or_none()
+            if account is None:
+                raise PaperAccountNotFound("paper account not found")
+
+            existing = await session.get(
+                KalshiPaperCancellation,
+                (normalized_account_id, normalized_cancellation_id),
+            )
+            if existing is not None:
+                if existing.order_id != normalized_order_id:
+                    raise PaperCancellationConflict(
+                        "cancellation_id already exists for a different immutable order target"
+                    )
+                return self._serialize_cancellation(existing)
+
+            order = (
+                await session.execute(
+                    select(KalshiPaperOrder)
+                    .where(
+                        KalshiPaperOrder.account_id == normalized_account_id,
+                        KalshiPaperOrder.order_id == normalized_order_id,
+                    )
+                    .with_for_update()
+                    .execution_options(populate_existing=True)
+                )
+            ).scalar_one_or_none()
+            if order is None:
+                raise PaperOrderNotCancelable("paper order is not cancelable")
+            prior = await session.scalar(
+                select(KalshiPaperCancellation).where(
+                    KalshiPaperCancellation.account_id == normalized_account_id,
+                    KalshiPaperCancellation.order_id == normalized_order_id,
+                )
+            )
+            reservation = cast(Decimal, order.reserved_cash)
+            if prior is not None or cast(Decimal, order.open_quantity) <= 0 or reservation <= 0:
+                raise PaperOrderNotCancelable("paper order is already terminal and not cancelable")
+
+            reserved_units = _to_scaled_int(cast(Decimal, account.reserved_cash), scale=18, field="reserved_cash")
+            release_units = _to_scaled_int(reservation, scale=18, field="order.reserved_cash")
+            if release_units > reserved_units:
+                raise RuntimeError("paper account reservation contradicts immutable order evidence")
+            now = self._now().astimezone(timezone.utc)
+            cancellation = KalshiPaperCancellation(
+                account_id=normalized_account_id,
+                cancellation_id=normalized_cancellation_id,
+                order_id=normalized_order_id,
+                released_cash=reservation,
+                status="cancelled",
+                created_at=now,
+            )
+            session.add(cancellation)
+            session.add(
+                KalshiPaperOrderEvent(
+                    account_id=normalized_account_id,
+                    order_id=normalized_order_id,
+                    sequence=2,
+                    event_type="cancelled",
+                    cancellation_id=normalized_cancellation_id,
+                    quantity=cast(Decimal, order.open_quantity),
+                    reserved_cash=reservation,
+                    created_at=now,
+                )
+            )
+            account.reserved_cash = _from_scaled_int(reserved_units - release_units, scale=18)
+            account.updated_at = now
+            await session.flush()
+            return self._serialize_cancellation(cancellation)
+
     async def record_decision(
         self,
         *,
@@ -207,6 +324,7 @@ class KalshiPaperService:
         action: Action,
         quantity: str | None = None,
         limit_price: str | None = None,
+        time_in_force: TimeInForce = "immediate_or_cancel",
     ) -> dict[str, object]:
         normalized_account_id = str(account_id or "").strip()
         normalized_decision_id = str(decision_id or "").strip()
@@ -218,6 +336,8 @@ class KalshiPaperService:
             raise ValueError("opportunity_revision must be a SHA-256 digest")
         if action not in {"execute", "pass"}:
             raise ValueError("action must be execute or pass")
+        if time_in_force not in {"immediate_or_cancel", "good_till_canceled"}:
+            raise ValueError("time_in_force must be immediate_or_cancel or good_till_canceled")
 
         parsed_quantity: Decimal | None = None
         parsed_limit: Decimal | None = None
@@ -229,6 +349,8 @@ class KalshiPaperService:
         else:
             if quantity is not None or limit_price is not None:
                 raise ValueError("pass decisions cannot include quantity or limit_price")
+            if time_in_force != "immediate_or_cancel":
+                raise ValueError("pass decisions cannot include good_till_canceled")
             canonical_quantity = None
             canonical_limit = None
 
@@ -241,6 +363,8 @@ class KalshiPaperService:
             "quantity": canonical_quantity,
             "limit_price": canonical_limit,
         }
+        if action == "execute" and time_in_force == "good_till_canceled":
+            request_payload["time_in_force"] = time_in_force
         request_hash = _sha256(_canonical_json(request_payload))
         existing = await self._read_existing(
             account_id=normalized_account_id,
@@ -297,6 +421,7 @@ class KalshiPaperService:
                                 resolved=resolved,
                                 requested_quantity=parsed_quantity,
                                 limit_price=parsed_limit,
+                                time_in_force=time_in_force,
                                 prepared=prepared,
                             )
 
@@ -320,6 +445,11 @@ class KalshiPaperService:
                                 strategy_version=resolved.strategy_version,
                                 ticker=resolved.ticker,
                                 outcome=resolved.outcome,
+                                time_in_force=(
+                                    "good_till_canceled"
+                                    if action == "execute" and time_in_force == "good_till_canceled"
+                                    else None
+                                ),
                                 requested_quantity=parsed_quantity,
                                 limit_price=parsed_limit,
                                 created_at=self._now().astimezone(timezone.utc),
@@ -370,6 +500,7 @@ class KalshiPaperService:
                             resolved=resolved,
                             requested_quantity=parsed_quantity,
                             limit_price=parsed_limit,
+                            time_in_force=time_in_force,
                             prepared=prepared,
                         )
             finally:
@@ -522,6 +653,7 @@ class KalshiPaperService:
         resolved: _ResolvedOpportunity,
         requested_quantity: Decimal | None,
         limit_price: Decimal | None,
+        time_in_force: TimeInForce,
         prepared: _PreparedDecision,
     ) -> dict[str, object]:
         account = (
@@ -542,6 +674,9 @@ class KalshiPaperService:
 
         cash_before = cast(Decimal, account.cash_balance)
         cash_before_units = _to_scaled_int(cash_before, scale=18, field="cash_balance")
+        reserved_before_units = _to_scaled_int(
+            cast(Decimal, account.reserved_cash), scale=18, field="reserved_cash"
+        )
         quote = prepared.quote
         fill_result = prepared.result
         status = prepared.status
@@ -588,9 +723,26 @@ class KalshiPaperService:
 
         notional_units = _to_scaled_int(notional, scale=18, field="notional")
         fee_units = _to_scaled_int(fee, scale=18, field="fee")
-        if status in {"filled", "partial"} and notional_units + fee_units > cash_before_units:
+        reservation_units = 0
+        creates_gtc_order = (
+            action == "execute"
+            and time_in_force == "good_till_canceled"
+            and status in {"filled", "partial", "no_fill"}
+            and requested_quantity is not None
+            and limit_price is not None
+        )
+        if creates_gtc_order:
+            open_quantity_units = _to_scaled_int(remaining_quantity, scale=2, field="open_quantity")
+            limit_price_units = _to_scaled_int(limit_price, scale=6, field="limit_price")
+            reservation_units = open_quantity_units * limit_price_units * 10**10
+        available_cash_units = cash_before_units - reserved_before_units
+        if (
+            status in {"filled", "partial", "no_fill"}
+            and notional_units + fee_units + reservation_units > available_cash_units
+        ):
             status = "rejected"
             reason = "insufficient_paper_cash"
+            creates_gtc_order = False
             fills = ()
             filled_quantity = Decimal("0")
             remaining_quantity = requested_quantity or Decimal("0")
@@ -599,7 +751,9 @@ class KalshiPaperService:
             fee = Decimal("0")
             notional_units = 0
             fee_units = 0
+            reservation_units = 0
         cash_after = _from_scaled_int(cash_before_units - notional_units - fee_units, scale=18)
+        reservation_added = _from_scaled_int(reservation_units, scale=18)
 
         account_sequence = int(account.journal_sequence) + 1
         fee_provenance_json = _canonical_json(dict(quote.market.fee_provenance)) if quote is not None else "{}"
@@ -619,7 +773,7 @@ class KalshiPaperService:
             event_ticker=quote.market.event_ticker if quote is not None else None,
             outcome=resolved.outcome,
             order_side="buy" if action == "execute" else None,
-            time_in_force="immediate_or_cancel" if action == "execute" else None,
+            time_in_force=time_in_force if action == "execute" else None,
             requested_quantity=requested_quantity,
             limit_price=limit_price,
             status=status,
@@ -673,7 +827,39 @@ class KalshiPaperService:
                     created_at=now,
                 )
             )
+        if creates_gtc_order:
+            order_id = f"paper-order:{_sha256(account_id + chr(0) + decision_id)[:32]}"
+            order = KalshiPaperOrder(
+                account_id=account_id,
+                order_id=order_id,
+                decision_id=decision_id,
+                ticker=resolved.ticker,
+                outcome=resolved.outcome,
+                side="buy",
+                time_in_force="good_till_canceled",
+                requested_quantity=requested_quantity,
+                filled_quantity=filled_quantity,
+                open_quantity=remaining_quantity,
+                limit_price=limit_price,
+                decision_status=status,
+                reserved_cash=reservation_added,
+                created_at=now,
+            )
+            session.add(order)
+            session.add(
+                KalshiPaperOrderEvent(
+                    account_id=account_id,
+                    order_id=order_id,
+                    sequence=1,
+                    event_type="opened",
+                    cancellation_id=None,
+                    quantity=remaining_quantity,
+                    reserved_cash=reservation_added,
+                    created_at=now,
+                )
+            )
         account.cash_balance = cash_after
+        account.reserved_cash = _from_scaled_int(reserved_before_units + reservation_units, scale=18)
         account.journal_sequence = account_sequence
         account.updated_at = now
         await session.flush()
@@ -681,12 +867,16 @@ class KalshiPaperService:
 
     @staticmethod
     def _serialize_account(account: KalshiPaperAccount) -> dict[str, object]:
+        cash_units = _to_scaled_int(cast(Decimal, account.cash_balance), scale=18, field="cash_balance")
+        reserved_units = _to_scaled_int(cast(Decimal, account.reserved_cash), scale=18, field="reserved_cash")
         return {
             "id": account.id,
             "name": account.name,
             "currency": account.currency,
             "starting_cash": _money18(cast(Decimal, account.starting_cash)),
             "cash_balance": _money18(cast(Decimal, account.cash_balance)),
+            "reserved_cash": _money18(cast(Decimal, account.reserved_cash)),
+            "available_cash": _money18(_from_scaled_int(cash_units - reserved_units, scale=18)),
             "journal_sequence": int(account.journal_sequence),
             "created_at": account.created_at.isoformat(),
             "updated_at": account.updated_at.isoformat(),
@@ -716,6 +906,12 @@ class KalshiPaperService:
             }
             for fill in fills
         ]
+        order = await session.scalar(
+            select(KalshiPaperOrder).where(
+                KalshiPaperOrder.account_id == decision.account_id,
+                KalshiPaperOrder.decision_id == decision.decision_id,
+            )
+        )
         return {
             "account_id": decision.account_id,
             "decision_id": decision.decision_id,
@@ -759,7 +955,53 @@ class KalshiPaperService:
             "fee_provenance": json.loads(decision.fee_provenance_json),
             "market_evidence_hash": decision.market_evidence_hash,
             "book_evidence_hash": decision.book_evidence_hash,
+            "order_id": order.order_id if order is not None else None,
+            "reserved_cash": _money18(cast(Decimal, order.reserved_cash)) if order is not None else _money18(Decimal("0")),
             "opportunity_snapshot": json.loads(decision.opportunity_snapshot_json),
             "fills": fill_payloads,
             "created_at": decision.created_at.isoformat(),
+        }
+
+    @staticmethod
+    def _serialize_cancellation(cancellation: KalshiPaperCancellation) -> dict[str, object]:
+        return {
+            "account_id": cancellation.account_id,
+            "order_id": cancellation.order_id,
+            "cancellation_id": cancellation.cancellation_id,
+            "status": cancellation.status,
+            "released_cash": _money18(cast(Decimal, cancellation.released_cash)),
+            "created_at": cancellation.created_at.isoformat(),
+        }
+
+    @staticmethod
+    async def _serialize_order(session: AsyncSession, order: KalshiPaperOrder) -> dict[str, object]:
+        cancellation = await session.scalar(
+            select(KalshiPaperCancellation).where(
+                KalshiPaperCancellation.account_id == order.account_id,
+                KalshiPaperCancellation.order_id == order.order_id,
+            )
+        )
+        cancelable = (
+            cancellation is None
+            and cast(Decimal, order.open_quantity) > 0
+            and cast(Decimal, order.reserved_cash) > 0
+        )
+        return {
+            "account_id": order.account_id,
+            "order_id": order.order_id,
+            "decision_id": order.decision_id,
+            "ticker": order.ticker,
+            "outcome": order.outcome,
+            "side": order.side,
+            "time_in_force": order.time_in_force,
+            "requested_quantity": decimal_string(cast(Decimal, order.requested_quantity), scale=2),
+            "filled_quantity": decimal_string(cast(Decimal, order.filled_quantity), scale=2),
+            "open_quantity": decimal_string(cast(Decimal, order.open_quantity), scale=2),
+            "limit_price": decimal_string(cast(Decimal, order.limit_price), scale=6),
+            "reserved_cash": _money18(cast(Decimal, order.reserved_cash)),
+            "cancelable": cancelable,
+            "status": "open" if cancelable else ("cancelled" if cancellation is not None else "filled"),
+            "cancellation_id": cancellation.cancellation_id if cancellation is not None else None,
+            "later_matching_supported": False,
+            "created_at": order.created_at.isoformat(),
         }

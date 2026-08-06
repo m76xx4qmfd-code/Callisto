@@ -3066,6 +3066,7 @@ class KalshiPaperAccount(Base):
     currency = Column(String, nullable=False, default="USD", server_default="USD")
     starting_cash = Column(Numeric(asdecimal=True), nullable=False)
     cash_balance = Column(Numeric(asdecimal=True), nullable=False)
+    reserved_cash = Column(Numeric(asdecimal=True), nullable=False, default=0, server_default="0")
     journal_sequence = Column(BigInteger, nullable=False, default=0, server_default="0")
     created_at = Column(DateTime, default=_utcnow, nullable=False)
     updated_at = Column(DateTime, default=_utcnow, onupdate=_utcnow, nullable=False)
@@ -3082,6 +3083,11 @@ class KalshiPaperAccount(Base):
             "cash_balance <> 'NaN'::numeric AND cash_balance < 'Infinity'::numeric "
             "AND cash_balance >= 0 AND scale(cash_balance) <= 18",
             name="ck_kalshi_paper_accounts_cash_balance",
+        ),
+        CheckConstraint(
+            "reserved_cash <> 'NaN'::numeric AND reserved_cash < 'Infinity'::numeric "
+            "AND reserved_cash >= 0 AND scale(reserved_cash) <= 18 AND reserved_cash <= cash_balance",
+            name="ck_kalshi_paper_accounts_reserved_cash",
         ),
         CheckConstraint("journal_sequence >= 0", name="ck_kalshi_paper_accounts_sequence"),
     )
@@ -3102,6 +3108,7 @@ class KalshiPaperIntent(Base):
     strategy_version = Column(Integer, nullable=True)
     ticker = Column(String, nullable=False)
     outcome = Column(String, nullable=False)
+    time_in_force = Column(String, nullable=True)
     requested_quantity = Column(Numeric(asdecimal=True), nullable=True)
     limit_price = Column(Numeric(asdecimal=True), nullable=True)
     created_at = Column(DateTime, default=_utcnow, nullable=False)
@@ -3122,8 +3129,10 @@ class KalshiPaperIntent(Base):
         CheckConstraint("action IN ('execute', 'pass')", name="ck_kalshi_paper_intents_action"),
         CheckConstraint("outcome IN ('yes', 'no')", name="ck_kalshi_paper_intents_outcome"),
         CheckConstraint(
-            "(action = 'pass' AND requested_quantity IS NULL AND limit_price IS NULL) OR "
-            "(action = 'execute' AND requested_quantity <> 'NaN'::numeric "
+            "(action = 'pass' AND time_in_force IS NULL "
+            "AND requested_quantity IS NULL AND limit_price IS NULL) OR "
+            "(action = 'execute' AND (time_in_force IS NULL OR time_in_force = 'good_till_canceled') "
+            "AND requested_quantity <> 'NaN'::numeric "
             "AND requested_quantity < 'Infinity'::numeric AND requested_quantity > 0 "
             "AND scale(requested_quantity) <= 2 "
             "AND limit_price <> 'NaN'::numeric AND limit_price > 0 AND limit_price < 1 "
@@ -3189,6 +3198,11 @@ class KalshiPaperDecision(Base):
             name="fk_kalshi_paper_decisions_intent",
         ),
         UniqueConstraint("account_id", "account_sequence", name="uq_kalshi_paper_decisions_sequence"),
+        UniqueConstraint(
+            "account_id", "decision_id", "ticker", "outcome", "order_side", "time_in_force",
+            "requested_quantity", "filled_quantity", "remaining_quantity", "limit_price", "status",
+            name="uq_kalshi_paper_decisions_order_facts",
+        ),
         CheckConstraint("length(btrim(decision_id)) > 0", name="ck_kalshi_paper_decisions_id"),
         CheckConstraint("account_sequence > 0", name="ck_kalshi_paper_decisions_sequence"),
         CheckConstraint("request_hash ~ '^[0-9a-f]{64}$'", name="ck_kalshi_paper_decisions_request_hash"),
@@ -3214,7 +3228,8 @@ class KalshiPaperDecision(Base):
         CheckConstraint(
             "(action = 'pass' AND order_side IS NULL AND time_in_force IS NULL "
             "AND requested_quantity IS NULL AND limit_price IS NULL) OR "
-            "(action = 'execute' AND order_side = 'buy' AND time_in_force = 'immediate_or_cancel' "
+            "(action = 'execute' AND order_side = 'buy' "
+            "AND time_in_force IN ('immediate_or_cancel', 'good_till_canceled') "
             "AND requested_quantity <> 'NaN'::numeric AND requested_quantity < 'Infinity'::numeric "
             "AND requested_quantity > 0 AND scale(requested_quantity) <= 2 "
             "AND limit_price <> 'NaN'::numeric AND limit_price > 0 AND limit_price < 1 "
@@ -3323,6 +3338,157 @@ class KalshiPaperFill(Base):
             "fee <> 'NaN'::numeric AND fee < 'Infinity'::numeric AND fee >= 0 AND scale(fee) <= 18",
             name="ck_kalshi_paper_fills_fee",
         ),
+    )
+
+
+class KalshiPaperOrder(Base):
+    """Immutable opening facts for a local paper GTC order."""
+
+    __tablename__ = "kalshi_paper_orders"
+
+    account_id = Column(String, primary_key=True)
+    order_id = Column(String, primary_key=True)
+    decision_id = Column(String, nullable=False)
+    ticker = Column(String, nullable=False)
+    outcome = Column(String, nullable=False)
+    side = Column(String, nullable=False)
+    time_in_force = Column(String, nullable=False)
+    requested_quantity = Column(Numeric(asdecimal=True), nullable=False)
+    filled_quantity = Column(Numeric(asdecimal=True), nullable=False)
+    open_quantity = Column(Numeric(asdecimal=True), nullable=False)
+    limit_price = Column(Numeric(asdecimal=True), nullable=False)
+    decision_status = Column(String, nullable=False)
+    reserved_cash = Column(Numeric(asdecimal=True), nullable=False)
+    created_at = Column(DateTime, default=_utcnow, nullable=False)
+
+    __table_args__ = (
+        ForeignKeyConstraint(
+            [
+                "account_id", "decision_id", "ticker", "outcome", "side", "time_in_force",
+                "requested_quantity", "filled_quantity", "open_quantity", "limit_price", "decision_status",
+            ],
+            [
+                "kalshi_paper_decisions.account_id", "kalshi_paper_decisions.decision_id",
+                "kalshi_paper_decisions.ticker", "kalshi_paper_decisions.outcome",
+                "kalshi_paper_decisions.order_side", "kalshi_paper_decisions.time_in_force",
+                "kalshi_paper_decisions.requested_quantity", "kalshi_paper_decisions.filled_quantity",
+                "kalshi_paper_decisions.remaining_quantity", "kalshi_paper_decisions.limit_price",
+                "kalshi_paper_decisions.status",
+            ],
+            ondelete="RESTRICT",
+            name="fk_kalshi_paper_orders_decision_facts",
+        ),
+        UniqueConstraint("account_id", "decision_id", name="uq_kalshi_paper_orders_decision"),
+        UniqueConstraint("account_id", "order_id", "reserved_cash", name="uq_kalshi_paper_orders_reservation"),
+        CheckConstraint("length(btrim(order_id)) > 0", name="ck_kalshi_paper_orders_id"),
+        CheckConstraint("side = 'buy'", name="ck_kalshi_paper_orders_side"),
+        CheckConstraint("outcome IN ('yes', 'no')", name="ck_kalshi_paper_orders_outcome"),
+        CheckConstraint("time_in_force = 'good_till_canceled'", name="ck_kalshi_paper_orders_tif"),
+        CheckConstraint(
+            "(decision_status = 'filled' AND open_quantity = 0) OR "
+            "(decision_status IN ('partial', 'no_fill') AND open_quantity > 0)",
+            name="ck_kalshi_paper_orders_decision_status",
+        ),
+        CheckConstraint(
+            "requested_quantity <> 'NaN'::numeric AND requested_quantity < 'Infinity'::numeric "
+            "AND requested_quantity > 0 AND scale(requested_quantity) <= 2 "
+            "AND filled_quantity <> 'NaN'::numeric AND filled_quantity < 'Infinity'::numeric "
+            "AND filled_quantity >= 0 AND scale(filled_quantity) <= 2 "
+            "AND open_quantity <> 'NaN'::numeric AND open_quantity < 'Infinity'::numeric "
+            "AND open_quantity >= 0 AND scale(open_quantity) <= 2 "
+            "AND requested_quantity = filled_quantity + open_quantity",
+            name="ck_kalshi_paper_orders_quantities",
+        ),
+        CheckConstraint(
+            "limit_price <> 'NaN'::numeric AND limit_price > 0 "
+            "AND limit_price < 1 AND scale(limit_price) <= 6",
+            name="ck_kalshi_paper_orders_price",
+        ),
+        CheckConstraint(
+            "reserved_cash <> 'NaN'::numeric AND reserved_cash < 'Infinity'::numeric "
+            "AND reserved_cash >= 0 AND scale(reserved_cash) <= 18 "
+            "AND reserved_cash = open_quantity * limit_price",
+            name="ck_kalshi_paper_orders_reservation_cash",
+        ),
+        Index("idx_kalshi_paper_orders_account_created", "account_id", "created_at"),
+    )
+
+
+class KalshiPaperCancellation(Base):
+    """Immutable terminal evidence for one full local cancellation."""
+
+    __tablename__ = "kalshi_paper_cancellations"
+
+    account_id = Column(String, primary_key=True)
+    cancellation_id = Column(String, primary_key=True)
+    order_id = Column(String, nullable=False)
+    released_cash = Column(Numeric(asdecimal=True), nullable=False)
+    status = Column(String, nullable=False)
+    created_at = Column(DateTime, default=_utcnow, nullable=False)
+
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["account_id", "order_id", "released_cash"],
+            ["kalshi_paper_orders.account_id", "kalshi_paper_orders.order_id", "kalshi_paper_orders.reserved_cash"],
+            ondelete="RESTRICT",
+            name="fk_kalshi_paper_cancellations_order_reservation",
+        ),
+        UniqueConstraint("account_id", "order_id", name="uq_kalshi_paper_cancellations_order"),
+        CheckConstraint("length(btrim(cancellation_id)) > 0", name="ck_kalshi_paper_cancellations_id"),
+        CheckConstraint("status = 'cancelled'", name="ck_kalshi_paper_cancellations_status"),
+        CheckConstraint(
+            "released_cash <> 'NaN'::numeric AND released_cash < 'Infinity'::numeric "
+            "AND released_cash > 0 AND scale(released_cash) <= 18",
+            name="ck_kalshi_paper_cancellations_cash",
+        ),
+    )
+
+
+class KalshiPaperOrderEvent(Base):
+    """Append-only local paper order lifecycle evidence."""
+
+    __tablename__ = "kalshi_paper_order_events"
+
+    account_id = Column(String, primary_key=True)
+    order_id = Column(String, primary_key=True)
+    sequence = Column(Integer, primary_key=True)
+    event_type = Column(String, nullable=False)
+    cancellation_id = Column(String, nullable=True)
+    quantity = Column(Numeric(asdecimal=True), nullable=False)
+    reserved_cash = Column(Numeric(asdecimal=True), nullable=False)
+    created_at = Column(DateTime, default=_utcnow, nullable=False)
+
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["account_id", "order_id"],
+            ["kalshi_paper_orders.account_id", "kalshi_paper_orders.order_id"],
+            ondelete="RESTRICT",
+            name="fk_kalshi_paper_order_events_order",
+        ),
+        ForeignKeyConstraint(
+            ["account_id", "cancellation_id"],
+            ["kalshi_paper_cancellations.account_id", "kalshi_paper_cancellations.cancellation_id"],
+            ondelete="RESTRICT",
+            name="fk_kalshi_paper_order_events_cancellation",
+        ),
+        CheckConstraint("sequence IN (1, 2)", name="ck_kalshi_paper_order_events_sequence"),
+        CheckConstraint("event_type IN ('opened', 'cancelled')", name="ck_kalshi_paper_order_events_type"),
+        CheckConstraint(
+            "(event_type = 'opened' AND sequence = 1 AND cancellation_id IS NULL) OR "
+            "(event_type = 'cancelled' AND sequence = 2 AND cancellation_id IS NOT NULL)",
+            name="ck_kalshi_paper_order_events_shape",
+        ),
+        CheckConstraint(
+            "quantity <> 'NaN'::numeric AND quantity < 'Infinity'::numeric "
+            "AND quantity >= 0 AND scale(quantity) <= 2",
+            name="ck_kalshi_paper_order_events_quantity",
+        ),
+        CheckConstraint(
+            "reserved_cash <> 'NaN'::numeric AND reserved_cash < 'Infinity'::numeric "
+            "AND reserved_cash >= 0 AND scale(reserved_cash) <= 18",
+            name="ck_kalshi_paper_order_events_cash",
+        ),
+        Index("idx_kalshi_paper_order_events_cancel", "account_id", "cancellation_id", unique=True),
     )
 
 
@@ -3845,7 +4011,11 @@ def _register_paper_intent_validation(table) -> None:  # noqa: ANN001
                    OR NEW.ticker IS DISTINCT FROM intended.ticker
                    OR NEW.outcome IS DISTINCT FROM intended.outcome
                    OR NEW.requested_quantity IS DISTINCT FROM intended.requested_quantity
-                   OR NEW.limit_price IS DISTINCT FROM intended.limit_price THEN
+                   OR NEW.limit_price IS DISTINCT FROM intended.limit_price
+                   OR NEW.time_in_force IS DISTINCT FROM (
+                      CASE WHEN intended.action = 'execute'
+                           THEN COALESCE(intended.time_in_force, 'immediate_or_cancel')
+                           ELSE NULL END) THEN
                     RAISE EXCEPTION 'Kalshi paper decision contradicts immutable intent';
                 END IF;
                 RETURN NEW;
@@ -4031,6 +4201,99 @@ def _register_paper_account_journal_validation(account_table, decision_table) ->
     )
 
 
+def _register_paper_order_lifecycle_validation(account_table, order_table, cancellation_table, event_table) -> None:  # noqa: ANN001
+    function_ddl = DDL(
+        """
+        CREATE OR REPLACE FUNCTION validate_kalshi_paper_order_lifecycle()
+        RETURNS trigger AS $$
+        DECLARE
+            target_account_id text;
+            projected_reserved numeric;
+            evidenced_reserved numeric;
+            broken_orders bigint;
+        BEGIN
+            IF TG_TABLE_NAME = 'kalshi_paper_accounts' THEN
+                target_account_id := NEW.id;
+            ELSE
+                target_account_id := NEW.account_id;
+            END IF;
+            SELECT reserved_cash INTO projected_reserved
+              FROM kalshi_paper_accounts WHERE id = target_account_id;
+            IF NOT FOUND THEN
+                RAISE EXCEPTION 'Kalshi paper account does not exist';
+            END IF;
+            SELECT COALESCE(sum(o.reserved_cash), 0) INTO evidenced_reserved
+              FROM kalshi_paper_orders o
+             WHERE o.account_id = target_account_id
+               AND NOT EXISTS (
+                   SELECT 1 FROM kalshi_paper_cancellations c
+                    WHERE c.account_id = o.account_id AND c.order_id = o.order_id
+               );
+            IF projected_reserved IS DISTINCT FROM evidenced_reserved THEN
+                RAISE EXCEPTION 'Kalshi paper account reserved cash does not match immutable orders';
+            END IF;
+            SELECT count(*) INTO broken_orders
+              FROM kalshi_paper_orders o
+             WHERE o.account_id = target_account_id
+               AND (
+                   (SELECT count(*) FROM kalshi_paper_order_events e
+                     WHERE e.account_id = o.account_id AND e.order_id = o.order_id
+                       AND e.sequence = 1 AND e.event_type = 'opened'
+                       AND e.cancellation_id IS NULL
+                       AND e.quantity = o.open_quantity
+                       AND e.reserved_cash = o.reserved_cash) <> 1
+                   OR (
+                       NOT EXISTS (SELECT 1 FROM kalshi_paper_cancellations c
+                                    WHERE c.account_id = o.account_id AND c.order_id = o.order_id)
+                       AND EXISTS (SELECT 1 FROM kalshi_paper_order_events e
+                                    WHERE e.account_id = o.account_id AND e.order_id = o.order_id AND e.sequence = 2)
+                   )
+                   OR EXISTS (
+                       SELECT 1 FROM kalshi_paper_cancellations c
+                        WHERE c.account_id = o.account_id AND c.order_id = o.order_id
+                          AND (SELECT count(*) FROM kalshi_paper_order_events e
+                                WHERE e.account_id = o.account_id AND e.order_id = o.order_id
+                                  AND e.sequence = 2 AND e.event_type = 'cancelled'
+                                  AND e.cancellation_id = c.cancellation_id
+                                  AND e.quantity = o.open_quantity
+                                  AND e.reserved_cash = c.released_cash) <> 1
+                   )
+               );
+            IF broken_orders <> 0 THEN
+                RAISE EXCEPTION 'Kalshi paper order events contradict immutable order or cancellation evidence';
+            END IF;
+            RETURN NEW;
+        END;
+        $$ LANGUAGE plpgsql
+        """
+    )
+    for table in (account_table, order_table, cancellation_table, event_table):
+        _sa_event.listen(table, "after_create", function_ddl)
+    _sa_event.listen(
+        account_table,
+        "after_create",
+        DDL(
+            "CREATE CONSTRAINT TRIGGER trg_kalshi_paper_accounts_validate_order_lifecycle "
+            "AFTER INSERT OR UPDATE ON kalshi_paper_accounts DEFERRABLE INITIALLY DEFERRED "
+            "FOR EACH ROW EXECUTE FUNCTION validate_kalshi_paper_order_lifecycle()"
+        ),
+    )
+    for table, trigger_name in (
+        (order_table, "trg_kalshi_paper_orders_validate_lifecycle"),
+        (cancellation_table, "trg_kalshi_paper_cancellations_validate_lifecycle"),
+        (event_table, "trg_kalshi_paper_order_events_validate_lifecycle"),
+    ):
+        _sa_event.listen(
+            table,
+            "after_create",
+            DDL(
+                f"CREATE CONSTRAINT TRIGGER {trigger_name} AFTER INSERT ON {table.name} "
+                "DEFERRABLE INITIALLY DEFERRED FOR EACH ROW "
+                "EXECUTE FUNCTION validate_kalshi_paper_order_lifecycle()"
+            ),
+        )
+
+
 def _register_immutable_ledger_table(table) -> None:  # noqa: ANN001
     table.info["immutable_rows"] = True
     _sa_event.listen(
@@ -4182,6 +4445,15 @@ _register_paper_intent_validation(KalshiPaperDecision.__table__)
 _register_immutable_paper_table(KalshiPaperFill.__table__)
 _register_paper_fill_validation(KalshiPaperFill.__table__)
 _register_paper_account_journal_validation(KalshiPaperAccount.__table__, KalshiPaperDecision.__table__)
+_register_immutable_paper_table(KalshiPaperOrder.__table__)
+_register_immutable_paper_table(KalshiPaperCancellation.__table__)
+_register_immutable_paper_table(KalshiPaperOrderEvent.__table__)
+_register_paper_order_lifecycle_validation(
+    KalshiPaperAccount.__table__,
+    KalshiPaperOrder.__table__,
+    KalshiPaperCancellation.__table__,
+    KalshiPaperOrderEvent.__table__,
+)
 _register_immutable_ledger_table(VenueOrderIntentRecord.__table__)
 _register_immutable_ledger_table(VenueExecutionEvent.__table__)
 _register_immutable_ledger_table(VenueProviderAcknowledgementRecord.__table__)

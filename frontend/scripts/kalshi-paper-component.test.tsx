@@ -6,13 +6,17 @@ import userEvent from '@testing-library/user-event'
 
 import type {
   KalshiPaperAccount,
+  KalshiPaperCancellationInput,
   KalshiPaperDecision,
   KalshiPaperDecisionInput,
   KalshiPaperEligibility,
+  KalshiPaperOrder,
 } from '../src/services/apiKalshiPaper'
 
 const recordCalls: KalshiPaperDecisionInput[] = []
 let recordResult: 'ambiguous' | 'success' = 'ambiguous'
+const cancellationCalls: KalshiPaperCancellationInput[] = []
+let cancellationResult: 'ambiguous' | 'success' = 'ambiguous'
 
 const accounts: KalshiPaperAccount[] = [
   {
@@ -21,6 +25,8 @@ const accounts: KalshiPaperAccount[] = [
     currency: 'USD',
     starting_cash: '10000.000000000000000000',
     cash_balance: '10000.000000000000000000',
+    reserved_cash: '0.000000000000000000',
+    available_cash: '10000.000000000000000000',
     journal_sequence: 0,
     created_at: '2026-08-05T12:00:00Z',
     updated_at: '2026-08-05T12:00:00Z',
@@ -31,6 +37,8 @@ const accounts: KalshiPaperAccount[] = [
     currency: 'USD',
     starting_cash: '500.000000000000000000',
     cash_balance: '500.000000000000000000',
+    reserved_cash: '0.600000000000000000',
+    available_cash: '499.400000000000000000',
     journal_sequence: 0,
     created_at: '2026-08-05T12:00:00Z',
     updated_at: '2026-08-05T12:00:00Z',
@@ -53,7 +61,6 @@ const successDecision: KalshiPaperDecision = {
   account_id: 'paper-secondary',
   decision_id: '',
   account_sequence: 1,
-  request_hash: 'b'.repeat(64),
   action: 'execute',
   opportunity_id: 'opp-live',
   opportunity_stable_id: 'opp-stable',
@@ -70,12 +77,7 @@ const successDecision: KalshiPaperDecision = {
   limit_price: '0.600000',
   status: 'filled',
   reason: 'displayed_depth_filled_ioc',
-  source_origin: 'https://external-api.kalshi.com',
-  market_observed_at: '2026-08-05T12:00:00Z',
-  market_fetched_at: '2026-08-05T12:00:00Z',
   market_evidence_hash: 'c'.repeat(64),
-  book_observed_at: '2026-08-05T12:00:00Z',
-  book_fetched_at: '2026-08-05T12:00:00Z',
   book_evidence_hash: 'd'.repeat(64),
   fill_formula_version: 'kalshi-complementary-depth-ioc-v1',
   fee_rule_version: 'kalshi-market-fee-waiver-v1',
@@ -87,8 +89,30 @@ const successDecision: KalshiPaperDecision = {
   fee: '0.000000000000000000',
   cash_before: '500.000000000000000000',
   cash_after: '498.900000000000000000',
+  order_id: null,
+  reserved_cash: '0.000000000000000000',
   fills: [],
   created_at: '2026-08-05T12:00:01Z',
+}
+
+const openOrder: KalshiPaperOrder = {
+  account_id: 'paper-secondary',
+  order_id: 'paper-order:stable',
+  decision_id: 'paper:gtc',
+  ticker: 'KXTEST-26',
+  outcome: 'yes',
+  side: 'buy',
+  time_in_force: 'good_till_canceled',
+  requested_quantity: '6.00',
+  filled_quantity: '5.00',
+  open_quantity: '1.00',
+  limit_price: '0.600000',
+  reserved_cash: '0.600000000000000000',
+  cancelable: true,
+  status: 'open',
+  cancellation_id: null,
+  later_matching_supported: false,
+  created_at: '2026-08-05T12:00:00Z',
 }
 
 vi.mock('../src/services/apiKalshiPaper', async (importOriginal) => {
@@ -97,6 +121,7 @@ vi.mock('../src/services/apiKalshiPaper', async (importOriginal) => {
     ...actual,
     getKalshiPaperAccounts: vi.fn(async () => accounts),
     getKalshiPaperDecisions: vi.fn(async () => []),
+    getKalshiPaperOrders: vi.fn(async (accountId: string) => accountId === 'paper-secondary' ? [openOrder] : []),
     getKalshiPaperEligibility: vi.fn(async () => eligibility),
     createKalshiPaperAccount: vi.fn(async () => accounts[0]),
     recordKalshiPaperDecision: vi.fn(async (input: KalshiPaperDecisionInput) => {
@@ -105,6 +130,16 @@ vi.mock('../src/services/apiKalshiPaper', async (importOriginal) => {
         throw new Error('Network Error')
       }
       return { ...successDecision, decision_id: input.decision_id }
+    }),
+    cancelKalshiPaperOrder: vi.fn(async (input: KalshiPaperCancellationInput) => {
+      cancellationCalls.push(JSON.parse(JSON.stringify(input)))
+      if (cancellationResult === 'ambiguous') throw new Error('Network Error')
+      return {
+        ...input,
+        status: 'cancelled' as const,
+        released_cash: '0.600000000000000000',
+        created_at: '2026-08-05T12:01:00Z',
+      }
     }),
   }
 })
@@ -127,6 +162,8 @@ describe('KalshiPaperPanel ambiguous replay across reload', () => {
     localStorage.clear()
     recordCalls.length = 0
     recordResult = 'ambiguous'
+    cancellationCalls.length = 0
+    cancellationResult = 'ambiguous'
   })
 
   afterEach(() => {
@@ -137,7 +174,7 @@ describe('KalshiPaperPanel ambiguous replay across reload', () => {
     const user = userEvent.setup()
     const first = mount()
 
-    const select = await screen.findByRole('combobox')
+    const select = await screen.findByRole('combobox', { name: 'Paper account' })
     await user.selectOptions(select, 'paper-secondary')
 
     await user.type(screen.getByPlaceholderText('Opportunity ID or stable ID'), 'opp-live')
@@ -175,7 +212,27 @@ describe('KalshiPaperPanel ambiguous replay across reload', () => {
     await screen.findByText('filled')
   })
 
-  it('discards a stored pending attempt containing unknown fields instead of replaying it', async () => {
+  it('replays a pre-upgrade IOC payload without changing its canonical identity', async () => {
+    const legacyPayload = {
+      account_id: 'paper-secondary',
+      decision_id: 'paper:legacy-ioc',
+      opportunity_id: 'opp-live',
+      opportunity_revision: 'a'.repeat(64),
+      action: 'execute' as const,
+      quantity: '1.00',
+      limit_price: '0.500000',
+    }
+    localStorage.setItem('callisto:kalshi-paper:pending-attempt', JSON.stringify(legacyPayload))
+    recordResult = 'success'
+
+    const user = userEvent.setup()
+    mount()
+    await user.click(await screen.findByRole('button', { name: /Retry same immutable decision/ }))
+    await waitFor(() => expect(recordCalls.length).toBe(1))
+    expect(recordCalls[0]).toEqual(legacyPayload)
+  })
+
+  it('quarantines an unreadable stored pending attempt and freezes financial actions', async () => {
     localStorage.setItem(
       'callisto:kalshi-paper:pending-attempt',
       JSON.stringify({
@@ -190,8 +247,37 @@ describe('KalshiPaperPanel ambiguous replay across reload', () => {
 
     mount()
 
-    await screen.findByRole('combobox')
-    expect(localStorage.getItem('callisto:kalshi-paper:pending-attempt')).toBeNull()
+    const accountSelect = await screen.findByRole('combobox', { name: 'Paper account' })
+    expect(localStorage.getItem('callisto:kalshi-paper:pending-attempt')).not.toBeNull()
+    expect(accountSelect.hasAttribute('disabled')).toBe(true)
+    expect(screen.getByText(/Persisted retry identity cannot be decoded/)).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'Create paper account' }).hasAttribute('disabled')).toBe(true)
     expect(screen.queryByText(/Retry same immutable decision/)).toBeNull()
+  })
+
+  it('replays a byte-equivalent cancellation after response loss and remount', async () => {
+    const user = userEvent.setup()
+    const first = mount()
+    const accountSelect = await screen.findByRole('combobox', { name: 'Paper account' })
+    await user.selectOptions(accountSelect, 'paper-secondary')
+    const cancel = await screen.findByRole('button', { name: 'Cancel remainder' })
+    await user.click(cancel)
+    await waitFor(() => expect(cancellationCalls.length).toBe(1))
+
+    const firstPayload = cancellationCalls[0]
+    expect(firstPayload.account_id).toBe('paper-secondary')
+    expect(firstPayload.order_id).toBe(openOrder.order_id)
+    expect(JSON.parse(localStorage.getItem('callisto:kalshi-paper:pending-cancellation') as string)).toEqual(firstPayload)
+    await screen.findByText(/Cancellation outcome unknown/)
+    expect(screen.getByRole('combobox', { name: 'Paper account' }).hasAttribute('disabled')).toBe(true)
+
+    first.unmount()
+    cancellationResult = 'success'
+    mount()
+    const retry = await screen.findByRole('button', { name: /Retry same immutable cancellation/ })
+    await user.click(retry)
+    await waitFor(() => expect(cancellationCalls.length).toBe(2))
+    expect(cancellationCalls[1]).toEqual(firstPayload)
+    await waitFor(() => expect(localStorage.getItem('callisto:kalshi-paper:pending-cancellation')).toBeNull())
   })
 })
