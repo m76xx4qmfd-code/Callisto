@@ -33,7 +33,9 @@ from services.kalshi_paper_execution import (
 from services.kalshi_paper_service import (
     KalshiPaperService,
     PaperDecisionConflict,
+    _canonical_json,
     _finish_cleanup_before_cancellation,
+    _sha256,
 )
 from tests.postgres_test_db import build_postgres_session_factory
 
@@ -65,6 +67,21 @@ async def test_repeated_cancellation_waits_for_owned_cleanup_task() -> None:
 
 
 def _quote() -> PaperQuote:
+    market_evidence_json = _canonical_json({
+        "ticker": "KXTEST-26",
+        "fee_waiver_expiration_time": "2026-08-05T12:10:00+00:00",
+    })
+    market_evidence_hash = _sha256(market_evidence_json)
+    book_evidence_json = _canonical_json(
+        {
+            "ticker": "KXTEST-26",
+            "yes_dollars": [["0.400000", "3.00"]],
+            "no_dollars": [["0.400000", "3.00"], ["0.450000", "2.00"]],
+            "source_origin": "https://external-api.kalshi.com",
+            "observed_at": NOW.isoformat(),
+        }
+    )
+    book_evidence_hash = _sha256(book_evidence_json)
     return PaperQuote(
         market=PaperMarket(
             ticker="KXTEST-26",
@@ -78,16 +95,16 @@ def _quote() -> PaperQuote:
                 {
                     "kind": "market_fee_waiver",
                     "waiver_expiration_time": "2026-08-05T12:10:00+00:00",
-                    "openapi_sha256": "4" * 64,
-                    "market_snapshot_hash": "b" * 64,
+                    "openapi_sha256": "41d93050bf3f692cf3a898ba3a1a033f3e857fee56370ddcb18af6a4225f41cb",
+                    "market_snapshot_hash": market_evidence_hash,
                     "observed_at": NOW.isoformat(),
                 }
             ),
             fee_waiver_expiration=datetime(2026, 8, 5, 12, 10, tzinfo=timezone.utc),
             observed_at=NOW,
             fetched_at=NOW,
-            evidence_hash="b" * 64,
-            evidence_json='{"ticker":"KXTEST-26"}',
+            evidence_hash=market_evidence_hash,
+            evidence_json=market_evidence_json,
         ),
         book=PaperBook(
             ticker="KXTEST-26",
@@ -99,8 +116,8 @@ def _quote() -> PaperQuote:
             source_origin="https://external-api.kalshi.com",
             observed_at=NOW,
             fetched_at=NOW,
-            evidence_hash="c" * 64,
-            evidence_json='{"ticker":"KXTEST-26"}',
+            evidence_hash=book_evidence_hash,
+            evidence_json=book_evidence_json,
         ),
     )
 
@@ -389,9 +406,31 @@ async def test_fee_waiver_expired_before_locked_commit_is_durable_rejection() ->
     engine, _factory, market_data, service = await _build("kalshi_paper_commit_fee_expiry")
     commit_time = datetime(2026, 8, 5, 12, 10, tzinfo=timezone.utc)
     quote = _quote()
+    fee_provenance = MappingProxyType({
+        **dict(quote.market.fee_provenance),
+        "observed_at": commit_time.isoformat(),
+    })
+    book_evidence_json = _canonical_json({
+        "ticker": quote.book.ticker,
+        "yes_dollars": [["0.400000", "3.00"]],
+        "no_dollars": [["0.400000", "3.00"], ["0.450000", "2.00"]],
+        "source_origin": quote.book.source_origin,
+        "observed_at": commit_time.isoformat(),
+    })
     market_data.fetch_quote.return_value = PaperQuote(
-        market=replace(quote.market, observed_at=commit_time, fetched_at=commit_time),
-        book=replace(quote.book, observed_at=commit_time, fetched_at=commit_time),
+        market=replace(
+            quote.market,
+            observed_at=commit_time,
+            fetched_at=commit_time,
+            fee_provenance=fee_provenance,
+        ),
+        book=replace(
+            quote.book,
+            observed_at=commit_time,
+            fetched_at=commit_time,
+            evidence_hash=_sha256(book_evidence_json),
+            evidence_json=book_evidence_json,
+        ),
     )
     service._now = lambda: commit_time
     try:
@@ -541,7 +580,7 @@ async def test_database_rejects_mutation_truncation_and_excess_scale() -> None:
                     "INSERT INTO kalshi_paper_intents "
                     "SELECT account_id, 'forged-journal', request_hash, action, opportunity_id, "
                     "opportunity_stable_id, opportunity_revision, opportunity_snapshot_json, strategy_key, "
-                    "strategy_version, ticker, outcome, time_in_force, requested_quantity, limit_price, created_at "
+                    "strategy_version, ticker, outcome, order_side, position_id, time_in_force, requested_quantity, limit_price, created_at "
                     "FROM kalshi_paper_intents WHERE decision_id = 'guarded'"
                 )
             )
@@ -550,11 +589,12 @@ async def test_database_rejects_mutation_truncation_and_excess_scale() -> None:
                     "INSERT INTO kalshi_paper_decisions "
                     "SELECT account_id, 'forged-journal', 2, request_hash, action, opportunity_id, "
                     "opportunity_stable_id, opportunity_revision, opportunity_snapshot_json, strategy_key, "
-                    "strategy_version, ticker, event_ticker, outcome, order_side, time_in_force, "
+                    "strategy_version, ticker, event_ticker, outcome, order_side, position_id, time_in_force, "
                     "requested_quantity, limit_price, 'rejected', 'forged', source_origin, market_observed_at, "
                     "market_fetched_at, market_evidence_hash, market_evidence_json, book_observed_at, "
                     "book_fetched_at, book_evidence_hash, book_evidence_json, fill_formula_version, "
-                    "fee_rule_version, fee_provenance_json, 0, requested_quantity, NULL, 0, 0, 999, 999, created_at "
+                    "fee_rule_version, fee_provenance_json, 0, requested_quantity, NULL, 0, 0, NULL, NULL, "
+                    "999, 999, created_at "
                     "FROM kalshi_paper_decisions WHERE decision_id = 'guarded'"
                 )
             )
@@ -567,7 +607,7 @@ async def test_database_rejects_mutation_truncation_and_excess_scale() -> None:
                     "INSERT INTO kalshi_paper_intents "
                     "SELECT account_id, 'contradiction', request_hash, action, opportunity_id, "
                     "opportunity_stable_id, opportunity_revision, opportunity_snapshot_json, strategy_key, "
-                    "strategy_version, ticker, outcome, time_in_force, requested_quantity, limit_price, created_at "
+                    "strategy_version, ticker, outcome, order_side, position_id, time_in_force, requested_quantity, limit_price, created_at "
                     "FROM kalshi_paper_intents WHERE decision_id = 'guarded'"
                 )
             )
@@ -577,12 +617,14 @@ async def test_database_rejects_mutation_truncation_and_excess_scale() -> None:
                         "INSERT INTO kalshi_paper_decisions "
                         "SELECT account_id, 'contradiction', 2, request_hash, action, opportunity_id, "
                         "opportunity_stable_id, opportunity_revision, opportunity_snapshot_json, strategy_key, "
-                        "strategy_version, ticker || '-DIFFERENT', event_ticker, outcome, order_side, time_in_force, "
+                        "strategy_version, ticker || '-DIFFERENT', event_ticker, outcome, order_side, position_id, "
+                        "time_in_force, "
                         "requested_quantity, limit_price, status, reason, source_origin, market_observed_at, "
                         "market_fetched_at, market_evidence_hash, market_evidence_json, book_observed_at, "
                         "book_fetched_at, book_evidence_hash, book_evidence_json, fill_formula_version, "
                         "fee_rule_version, fee_provenance_json, filled_quantity, remaining_quantity, "
-                        "average_fill_price, notional, fee, cash_before, cash_after, created_at "
+                        "average_fill_price, notional, fee, position_cost_basis, realized_pnl, "
+                        "cash_before, cash_after, created_at "
                         "FROM kalshi_paper_decisions WHERE decision_id = 'guarded'"
                     )
                 )
@@ -597,5 +639,35 @@ async def test_database_rejects_mutation_truncation_and_excess_scale() -> None:
                     )
                 )
                 await session.commit()
+
+        for forged_id, fee_expression, cash_after_expression, fee_rule_expression, expected_error in (
+            ("forged-fee", "0.100000000000000000", "cash_after - 0.100000000000000000", "fee_rule_version",
+             "fee contradicts the fee-waiver contract"),
+            ("forged-fee-rule", "fee", "cash_after", "'unsupported-fee-rule'",
+             "fee rule is unsupported"),
+        ):
+            async with factory() as session:
+                await session.execute(text(
+                    "INSERT INTO kalshi_paper_intents "
+                    "SELECT account_id, :forged_id, request_hash, action, opportunity_id, "
+                    "opportunity_stable_id, opportunity_revision, opportunity_snapshot_json, strategy_key, "
+                    "strategy_version, ticker, outcome, order_side, position_id, time_in_force, "
+                    "requested_quantity, limit_price, created_at "
+                    "FROM kalshi_paper_intents WHERE decision_id = 'guarded'"
+                ), {"forged_id": forged_id})
+                with pytest.raises(DBAPIError, match=expected_error):
+                    await session.execute(text(
+                        "INSERT INTO kalshi_paper_decisions "
+                        "SELECT account_id, :forged_id, 2, request_hash, action, opportunity_id, "
+                        "opportunity_stable_id, opportunity_revision, opportunity_snapshot_json, strategy_key, "
+                        "strategy_version, ticker, event_ticker, outcome, order_side, position_id, time_in_force, "
+                        "requested_quantity, limit_price, status, reason, source_origin, market_observed_at, "
+                        "market_fetched_at, market_evidence_hash, market_evidence_json, book_observed_at, "
+                        "book_fetched_at, book_evidence_hash, book_evidence_json, fill_formula_version, "
+                        f"{fee_rule_expression}, fee_provenance_json, filled_quantity, remaining_quantity, "
+                        f"average_fill_price, notional, {fee_expression}, position_cost_basis, realized_pnl, "
+                        f"cash_before, {cash_after_expression}, created_at "
+                        "FROM kalshi_paper_decisions WHERE decision_id = 'guarded'"
+                    ), {"forged_id": forged_id})
     finally:
         await engine.dispose()

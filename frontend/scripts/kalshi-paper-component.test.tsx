@@ -11,12 +11,16 @@ import type {
   KalshiPaperDecisionInput,
   KalshiPaperEligibility,
   KalshiPaperOrder,
+  KalshiPaperPosition,
+  KalshiPaperPositionExitInput,
 } from '../src/services/apiKalshiPaper'
 
 const recordCalls: KalshiPaperDecisionInput[] = []
 let recordResult: 'ambiguous' | 'success' = 'ambiguous'
 const cancellationCalls: KalshiPaperCancellationInput[] = []
 let cancellationResult: 'ambiguous' | 'success' = 'ambiguous'
+const positionExitCalls: KalshiPaperPositionExitInput[] = []
+let positionExitResult: 'ambiguous' | 'success' = 'ambiguous'
 
 const accounts: KalshiPaperAccount[] = [
   {
@@ -72,6 +76,7 @@ const successDecision: KalshiPaperDecision = {
   event_ticker: 'KXTEST',
   outcome: 'yes',
   order_side: 'buy',
+  position_id: null,
   time_in_force: 'immediate_or_cancel',
   requested_quantity: '2.00',
   limit_price: '0.600000',
@@ -87,6 +92,8 @@ const successDecision: KalshiPaperDecision = {
   average_fill_price: '0.550000000000000000',
   notional: '1.10000000',
   fee: '0.000000000000000000',
+  position_cost_basis: null,
+  realized_pnl: null,
   cash_before: '500.000000000000000000',
   cash_after: '498.900000000000000000',
   order_id: null,
@@ -115,6 +122,27 @@ const openOrder: KalshiPaperOrder = {
   created_at: '2026-08-05T12:00:00Z',
 }
 
+const openPosition: KalshiPaperPosition = {
+  account_id: 'paper-secondary',
+  position_id: 'paper-position:abc',
+  entry_decision_id: 'paper:entry',
+  ticker: 'KXTEST-26',
+  outcome: 'yes',
+  entry_quantity: '4.00',
+  entry_notional: '2.300000000000000000',
+  entry_fee: '0.000000000000000000',
+  sold_quantity: '0.00',
+  remaining_quantity: '4.00',
+  exit_notional: '0.000000000000000000',
+  exit_fee: '0.000000000000000000',
+  allocated_entry_cost: '0.000000000000000000',
+  realized_pnl: '0.000000000000000000',
+  status: 'open',
+  closable: true,
+  exit_decision_ids: [],
+  created_at: '2026-08-06T12:00:00Z',
+}
+
 vi.mock('../src/services/apiKalshiPaper', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../src/services/apiKalshiPaper')>()
   return {
@@ -122,6 +150,7 @@ vi.mock('../src/services/apiKalshiPaper', async (importOriginal) => {
     getKalshiPaperAccounts: vi.fn(async () => accounts),
     getKalshiPaperDecisions: vi.fn(async () => []),
     getKalshiPaperOrders: vi.fn(async (accountId: string) => accountId === 'paper-secondary' ? [openOrder] : []),
+    getKalshiPaperPositions: vi.fn(async (accountId: string) => accountId === 'paper-secondary' ? [openPosition] : []),
     getKalshiPaperEligibility: vi.fn(async () => eligibility),
     createKalshiPaperAccount: vi.fn(async () => accounts[0]),
     recordKalshiPaperDecision: vi.fn(async (input: KalshiPaperDecisionInput) => {
@@ -139,6 +168,30 @@ vi.mock('../src/services/apiKalshiPaper', async (importOriginal) => {
         status: 'cancelled' as const,
         released_cash: '0.600000000000000000',
         created_at: '2026-08-05T12:01:00Z',
+      }
+    }),
+    exitKalshiPaperPosition: vi.fn(async (input: KalshiPaperPositionExitInput) => {
+      positionExitCalls.push(JSON.parse(JSON.stringify(input)))
+      if (positionExitResult === 'ambiguous') throw new Error('Network Error')
+      return {
+        ...successDecision,
+        account_id: input.account_id,
+        decision_id: input.decision_id,
+        account_sequence: 2,
+        position_id: input.position_id,
+        order_side: 'sell' as const,
+        time_in_force: 'immediate_or_cancel' as const,
+        requested_quantity: input.quantity,
+        limit_price: input.minimum_price,
+        filled_quantity: input.quantity,
+        remaining_quantity: '0.00',
+        average_fill_price: '0.400000000000000000',
+        notional: '1.600000000000000000',
+        position_cost_basis: '2.300000000000000000',
+        realized_pnl: '-0.700000000000000000',
+        cash_before: '497.700000000000000000',
+        cash_after: '499.300000000000000000',
+        fill_formula_version: 'kalshi-direct-bid-ioc-v1',
       }
     }),
   }
@@ -164,6 +217,8 @@ describe('KalshiPaperPanel ambiguous replay across reload', () => {
     recordResult = 'ambiguous'
     cancellationCalls.length = 0
     cancellationResult = 'ambiguous'
+    positionExitCalls.length = 0
+    positionExitResult = 'ambiguous'
   })
 
   afterEach(() => {
@@ -279,5 +334,56 @@ describe('KalshiPaperPanel ambiguous replay across reload', () => {
     await waitFor(() => expect(cancellationCalls.length).toBe(2))
     expect(cancellationCalls[1]).toEqual(firstPayload)
     await waitFor(() => expect(localStorage.getItem('callisto:kalshi-paper:pending-cancellation')).toBeNull())
+  })
+
+  it('replays an exact paper SELL IOC after response loss and remount', async () => {
+    const user = userEvent.setup()
+    const first = mount()
+    const accountSelect = await screen.findByRole('combobox', { name: 'Paper account' })
+    await user.selectOptions(accountSelect, 'paper-secondary')
+    await user.click(await screen.findByRole('button', { name: 'Prepare SELL IOC' }))
+
+    const quantityInput = screen.getByRole('textbox', { name: `SELL quantity ${openPosition.position_id}` })
+    const priceInput = screen.getByRole('textbox', { name: `Minimum SELL price ${openPosition.position_id}` })
+    await user.clear(quantityInput)
+    await user.type(quantityInput, '2.00')
+    await user.clear(priceInput)
+    await user.type(priceInput, '0.400000')
+    await user.click(screen.getByRole('button', { name: 'SELL IOC — PAPER ONLY' }))
+    await waitFor(() => expect(positionExitCalls.length).toBe(1))
+
+    const firstPayload = positionExitCalls[0]
+    expect(firstPayload).toMatchObject({
+      account_id: 'paper-secondary',
+      position_id: openPosition.position_id,
+      quantity: '2.00',
+      minimum_price: '0.400000',
+    })
+    expect(JSON.parse(localStorage.getItem('callisto:kalshi-paper:pending-position-exit') as string)).toEqual(firstPayload)
+    await screen.findByText(/SELL IOC outcome unknown/)
+    expect(screen.getByRole('combobox', { name: 'Paper account' }).hasAttribute('disabled')).toBe(true)
+
+    first.unmount()
+    positionExitResult = 'success'
+    mount()
+    await user.click(await screen.findByRole('button', { name: /Retry same immutable SELL IOC/ }))
+    await waitFor(() => expect(positionExitCalls.length).toBe(2))
+    expect(positionExitCalls[1]).toEqual(firstPayload)
+    await waitFor(() => expect(localStorage.getItem('callisto:kalshi-paper:pending-position-exit')).toBeNull())
+  })
+
+  it('quarantines malformed pending SELL identity without deleting it', async () => {
+    localStorage.setItem('callisto:kalshi-paper:pending-position-exit', JSON.stringify({
+      account_id: 'paper-secondary',
+      position_id: openPosition.position_id,
+      decision_id: 'paper-exit:stale',
+      quantity: 2,
+      minimum_price: '0.400000',
+    }))
+    mount()
+    const accountSelect = await screen.findByRole('combobox', { name: 'Paper account' })
+    expect(accountSelect.hasAttribute('disabled')).toBe(true)
+    expect(localStorage.getItem('callisto:kalshi-paper:pending-position-exit')).not.toBeNull()
+    expect(screen.getByText(/Persisted retry identity cannot be decoded/)).toBeTruthy()
   })
 })

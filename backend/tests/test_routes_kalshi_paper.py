@@ -7,13 +7,20 @@ from fastapi import HTTPException
 from pydantic import ValidationError
 
 from api import routes_kalshi_paper
-from api.routes_kalshi_paper import CreatePaperAccountRequest, PaperCancellationRequest, PaperDecisionRequest
+from api.routes_kalshi_paper import (
+    CreatePaperAccountRequest,
+    PaperCancellationRequest,
+    PaperDecisionRequest,
+    PaperExitRequest,
+)
 from services.kalshi_paper_service import (
     PaperAccountNotFound,
     PaperCancellationConflict,
     PaperDecisionConflict,
     PaperOpportunityIneligible,
     PaperOrderNotCancelable,
+    PaperPositionNotClosable,
+    PaperPositionNotFound,
 )
 
 
@@ -138,3 +145,62 @@ async def test_order_routes_delegate_and_map_terminal_conflicts(monkeypatch) -> 
     with pytest.raises(HTTPException) as conflict:
         await routes_kalshi_paper.cancel_paper_order(request)
     assert conflict.value.status_code == 409
+
+
+def test_exit_request_is_strict_and_requires_canonical_string_fields() -> None:
+    request = PaperExitRequest(
+        account_id="account",
+        decision_id="exit-1",
+        quantity="2.00",
+        minimum_price="0.400000",
+    )
+    assert request.minimum_price == "0.400000"
+    with pytest.raises(ValidationError, match="extra_forbidden"):
+        PaperExitRequest.model_validate(
+            {
+                "account_id": "account",
+                "decision_id": "exit-1",
+                "quantity": "2.00",
+                "minimum_price": "0.400000",
+                "order_side": "sell",
+            }
+        )
+    with pytest.raises(ValidationError):
+        PaperExitRequest(
+            account_id="account",
+            decision_id="exit-1",
+            quantity=2,  # type: ignore[arg-type]
+            minimum_price="0.400000",
+        )
+    for quantity, minimum_price in (("2.0", "0.400000"), ("2.00", "0.4"), ("02.00", "0.400000")):
+        with pytest.raises(ValidationError):
+            PaperExitRequest(
+                account_id="account",
+                decision_id="exit-1",
+                quantity=quantity,
+                minimum_price=minimum_price,
+            )
+
+
+@pytest.mark.asyncio
+async def test_position_routes_delegate_and_map_exit_boundaries(monkeypatch) -> None:
+    list_positions = AsyncMock(return_value=[{"position_id": "position"}])
+    monkeypatch.setattr(routes_kalshi_paper.paper_service, "list_positions", list_positions)
+    assert await routes_kalshi_paper.list_paper_positions("account", 25) == [{"position_id": "position"}]
+    list_positions.assert_awaited_once_with(account_id="account", limit=25)
+
+    request = PaperExitRequest(
+        account_id="account",
+        decision_id="exit-1",
+        quantity="2.00",
+        minimum_price="0.400000",
+    )
+    record_exit = AsyncMock(side_effect=PaperPositionNotFound("missing"))
+    monkeypatch.setattr(routes_kalshi_paper.paper_service, "record_exit", record_exit)
+    with pytest.raises(HTTPException) as missing:
+        await routes_kalshi_paper.exit_paper_position("position", request)
+    assert missing.value.status_code == 404
+    record_exit.side_effect = PaperPositionNotClosable("closed")
+    with pytest.raises(HTTPException) as terminal:
+        await routes_kalshi_paper.exit_paper_position("position", request)
+    assert terminal.value.status_code == 409

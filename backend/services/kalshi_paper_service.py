@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from typing import Literal, Protocol, cast
 
-from sqlalchemy import select, text
+from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 from sqlalchemy.orm import sessionmaker
 
@@ -23,6 +23,7 @@ from models.database import (
     KalshiPaperIntent,
     KalshiPaperOrder,
     KalshiPaperOrderEvent,
+    KalshiPaperPosition,
     OpportunityState,
 )
 from services.kalshi_paper_execution import (
@@ -37,6 +38,7 @@ from services.kalshi_paper_execution import (
     parse_price,
     parse_quantity,
     simulate_buy_ioc,
+    simulate_sell_ioc,
 )
 
 Action = Literal["execute", "pass"]
@@ -66,6 +68,14 @@ class PaperCancellationConflict(RuntimeError):
 
 
 class PaperOrderNotCancelable(RuntimeError):
+    pass
+
+
+class PaperPositionNotFound(LookupError):
+    pass
+
+
+class PaperPositionNotClosable(RuntimeError):
     pass
 
 
@@ -224,6 +234,20 @@ class KalshiPaperService:
             ).scalars()
             return [await self._serialize_order(session, order) for order in orders]
 
+    async def list_positions(self, *, account_id: str, limit: int = 100) -> list[dict[str, object]]:
+        async with self._session_factory() as session:
+            if await session.get(KalshiPaperAccount, account_id) is None:
+                raise PaperAccountNotFound("paper account not found")
+            positions = (
+                await session.execute(
+                    select(KalshiPaperPosition)
+                    .where(KalshiPaperPosition.account_id == account_id)
+                    .order_by(KalshiPaperPosition.created_at.desc())
+                    .limit(limit)
+                )
+            ).scalars()
+            return [await self._serialize_position(session, position) for position in positions]
+
     async def cancel_order(
         self,
         *,
@@ -313,6 +337,214 @@ class KalshiPaperService:
             account.updated_at = now
             await session.flush()
             return self._serialize_cancellation(cancellation)
+
+    async def record_exit(
+        self,
+        *,
+        account_id: str,
+        decision_id: str,
+        position_id: str,
+        quantity: str,
+        minimum_price: str,
+    ) -> dict[str, object]:
+        normalized_account_id = str(account_id or "").strip()
+        normalized_decision_id = str(decision_id or "").strip()
+        normalized_position_id = str(position_id or "").strip()
+        if not normalized_account_id or not normalized_decision_id or not normalized_position_id:
+            raise ValueError("account_id, decision_id, and position_id are required")
+        requested_quantity = parse_quantity(quantity)
+        parsed_minimum_price = parse_price(minimum_price, field="minimum_price")
+        canonical_request = _canonical_json(
+            {
+                "account_id": normalized_account_id,
+                "decision_id": normalized_decision_id,
+                "position_id": normalized_position_id,
+                "action": "execute",
+                "order_side": "sell",
+                "time_in_force": "immediate_or_cancel",
+                "quantity": decimal_string(requested_quantity, scale=2),
+                "minimum_price": decimal_string(parsed_minimum_price, scale=6),
+            }
+        )
+        request_hash = _sha256(canonical_request)
+        existing = await self._read_existing(
+            account_id=normalized_account_id,
+            decision_id=normalized_decision_id,
+            request_hash=request_hash,
+        )
+        if existing is not None:
+            return existing
+
+        decision_lock = _decision_lock_key(normalized_account_id, normalized_decision_id)
+        position_lock = _decision_lock_key(normalized_account_id, f"position:{normalized_position_id}")
+        lock_keys = [decision_lock] if decision_lock == position_lock else [decision_lock, position_lock]
+        async with self._database_engine.connect() as connection:
+            acquired: list[int] = []
+            try:
+                for lock_key in lock_keys:
+                    await connection.execute(text("SELECT pg_advisory_lock(:lock_key)"), {"lock_key": lock_key})
+                    acquired.append(lock_key)
+                await connection.commit()
+
+                bound_factory = sessionmaker(bind=connection, class_=AsyncSession, expire_on_commit=False)
+                resumed_intent = False
+                resolved: _ResolvedOpportunity
+                async with bound_factory() as session, session.begin():
+                    decision = await session.get(
+                        KalshiPaperDecision,
+                        (normalized_account_id, normalized_decision_id),
+                        populate_existing=True,
+                    )
+                    if decision is not None:
+                        if decision.request_hash != request_hash:
+                            raise PaperDecisionConflict("decision_id already exists with different immutable request facts")
+                        return await self._serialize_decision(session, decision)
+                    intent = await session.get(
+                        KalshiPaperIntent,
+                        (normalized_account_id, normalized_decision_id),
+                        populate_existing=True,
+                    )
+                    if intent is not None:
+                        if intent.request_hash != request_hash:
+                            raise PaperDecisionConflict("decision_id already exists with different immutable request facts")
+                        resumed_intent = True
+                        resolved = self._resolved_from_intent(intent)
+                    else:
+                        if await session.get(KalshiPaperAccount, normalized_account_id) is None:
+                            raise PaperAccountNotFound("paper account not found")
+                        position = await session.get(
+                            KalshiPaperPosition,
+                            (normalized_account_id, normalized_position_id),
+                        )
+                        if position is None:
+                            raise PaperPositionNotFound("paper position not found")
+                        entry = await session.get(
+                            KalshiPaperDecision,
+                            (normalized_account_id, position.entry_decision_id),
+                        )
+                        if entry is None:
+                            raise PaperPositionNotFound("paper position entry evidence not found")
+                        unresolved_exit_id = await session.scalar(
+                            select(KalshiPaperIntent.decision_id)
+                            .where(
+                                KalshiPaperIntent.account_id == normalized_account_id,
+                                KalshiPaperIntent.position_id == normalized_position_id,
+                                KalshiPaperIntent.order_side == "sell",
+                                KalshiPaperIntent.decision_id.not_in(
+                                    select(KalshiPaperDecision.decision_id).where(
+                                        KalshiPaperDecision.account_id == normalized_account_id
+                                    )
+                                ),
+                            )
+                            .limit(1)
+                        )
+                        if unresolved_exit_id is not None:
+                            raise PaperPositionNotClosable(
+                                f"paper position has unresolved exit intent {unresolved_exit_id}; retry it first"
+                            )
+                        sold_quantity = cast(
+                            Decimal,
+                            await session.scalar(
+                                select(func.coalesce(func.sum(KalshiPaperDecision.filled_quantity), Decimal("0"))).where(
+                                    KalshiPaperDecision.account_id == normalized_account_id,
+                                    KalshiPaperDecision.position_id == normalized_position_id,
+                                    KalshiPaperDecision.order_side == "sell",
+                                )
+                            ),
+                        )
+                        entry_quantity_units = _to_scaled_int(
+                            cast(Decimal, position.entry_quantity), scale=2, field="entry_quantity"
+                        )
+                        sold_quantity_units = _to_scaled_int(
+                            sold_quantity, scale=2, field="sold_quantity"
+                        )
+                        remaining_units = entry_quantity_units - sold_quantity_units
+                        if remaining_units <= 0:
+                            raise PaperPositionNotClosable("paper position is already closed")
+                        if _to_scaled_int(requested_quantity, scale=2, field="requested_quantity") > remaining_units:
+                            raise PaperPositionNotClosable("exit quantity exceeds the remaining paper position")
+                        resolved = _ResolvedOpportunity(
+                            opportunity_id=entry.opportunity_id,
+                            stable_id=entry.opportunity_stable_id,
+                            strategy_key=entry.strategy_key,
+                            strategy_version=entry.strategy_version,
+                            ticker=position.ticker,
+                            outcome=cast(Literal["yes", "no"], position.outcome),
+                            snapshot_json=entry.opportunity_snapshot_json,
+                            revision=entry.opportunity_revision,
+                        )
+                        session.add(
+                            KalshiPaperIntent(
+                                account_id=normalized_account_id,
+                                decision_id=normalized_decision_id,
+                                request_hash=request_hash,
+                                action="execute",
+                                opportunity_id=resolved.opportunity_id,
+                                opportunity_stable_id=resolved.stable_id,
+                                opportunity_revision=resolved.revision,
+                                opportunity_snapshot_json=resolved.snapshot_json,
+                                strategy_key=resolved.strategy_key,
+                                strategy_version=resolved.strategy_version,
+                                ticker=resolved.ticker,
+                                outcome=resolved.outcome,
+                                order_side="sell",
+                                position_id=normalized_position_id,
+                                time_in_force="immediate_or_cancel",
+                                requested_quantity=requested_quantity,
+                                limit_price=parsed_minimum_price,
+                                created_at=self._now().astimezone(timezone.utc),
+                            )
+                        )
+
+                if resumed_intent:
+                    prepared = _PreparedDecision(
+                        quote=None,
+                        result=None,
+                        status="rejected",
+                        reason="incomplete_exit_intent_rejected_after_restart",
+                    )
+                else:
+                    quote = await self._market_data.fetch_quote(resolved.ticker)
+                    if quote.market.ticker != resolved.ticker or quote.book.ticker != resolved.ticker:
+                        raise KalshiPaperProtocolError("paper quote ticker does not match the held position")
+                    result = simulate_sell_ioc(
+                        book=quote.book,
+                        outcome=resolved.outcome,
+                        quantity=requested_quantity,
+                        minimum_price=parsed_minimum_price,
+                        price_ranges=quote.market.price_ranges,
+                    )
+                    prepared = _PreparedDecision(quote=quote, result=result, status=result.status, reason=result.reason)
+
+                async with bound_factory() as session, session.begin():
+                    return await self._commit_exit(
+                        session=session,
+                        account_id=normalized_account_id,
+                        decision_id=normalized_decision_id,
+                        position_id=normalized_position_id,
+                        request_hash=request_hash,
+                        resolved=resolved,
+                        requested_quantity=requested_quantity,
+                        minimum_price=parsed_minimum_price,
+                        prepared=prepared,
+                    )
+            finally:
+                async def release_and_discard_connection() -> None:
+                    try:
+                        if connection.in_transaction():
+                            await connection.rollback()
+                        for lock_key in reversed(acquired):
+                            await connection.execute(
+                                text("SELECT pg_advisory_unlock(:lock_key)"),
+                                {"lock_key": lock_key},
+                            )
+                        if acquired:
+                            await connection.commit()
+                    finally:
+                        await connection.invalidate()
+
+                cleanup_task = asyncio.create_task(release_and_discard_connection())
+                await _finish_cleanup_before_cancellation(cleanup_task)
 
     async def record_decision(
         self,
@@ -445,6 +677,8 @@ class KalshiPaperService:
                                 strategy_version=resolved.strategy_version,
                                 ticker=resolved.ticker,
                                 outcome=resolved.outcome,
+                                order_side=None,
+                                position_id=None,
                                 time_in_force=(
                                     "good_till_canceled"
                                     if action == "execute" and time_in_force == "good_till_canceled"
@@ -653,6 +887,209 @@ class KalshiPaperService:
             revision=intent.opportunity_revision,
         )
 
+    async def _commit_exit(
+        self,
+        *,
+        session: AsyncSession,
+        account_id: str,
+        decision_id: str,
+        position_id: str,
+        request_hash: str,
+        resolved: _ResolvedOpportunity,
+        requested_quantity: Decimal,
+        minimum_price: Decimal,
+        prepared: _PreparedDecision,
+    ) -> dict[str, object]:
+        account = (
+            await session.execute(
+                select(KalshiPaperAccount)
+                .where(KalshiPaperAccount.id == account_id)
+                .with_for_update()
+                .execution_options(populate_existing=True)
+            )
+        ).scalar_one_or_none()
+        if account is None:
+            raise PaperAccountNotFound("paper account not found")
+        existing = await session.get(KalshiPaperDecision, (account_id, decision_id))
+        if existing is not None:
+            if existing.request_hash != request_hash:
+                raise PaperDecisionConflict("decision_id already exists with different immutable request facts")
+            return await self._serialize_decision(session, existing)
+        position = (
+            await session.execute(
+                select(KalshiPaperPosition)
+                .where(
+                    KalshiPaperPosition.account_id == account_id,
+                    KalshiPaperPosition.position_id == position_id,
+                )
+                .with_for_update()
+                .execution_options(populate_existing=True)
+            )
+        ).scalar_one_or_none()
+        if position is None:
+            raise PaperPositionNotFound("paper position not found")
+
+        prior_sold, prior_cost = (
+            await session.execute(
+                select(
+                    func.coalesce(func.sum(KalshiPaperDecision.filled_quantity), Decimal("0")),
+                    func.coalesce(func.sum(KalshiPaperDecision.position_cost_basis), Decimal("0")),
+                ).where(
+                    KalshiPaperDecision.account_id == account_id,
+                    KalshiPaperDecision.position_id == position_id,
+                    KalshiPaperDecision.order_side == "sell",
+                )
+            )
+        ).one()
+        prior_sold = cast(Decimal, prior_sold)
+        prior_cost = cast(Decimal, prior_cost)
+        position_quantity = cast(Decimal, position.entry_quantity)
+        entry_quantity_units = _to_scaled_int(position_quantity, scale=2, field="entry_quantity")
+        prior_sold_units = _to_scaled_int(prior_sold, scale=2, field="prior_sold_quantity")
+        position_remaining_units = entry_quantity_units - prior_sold_units
+
+        quote = prepared.quote
+        fill_result = prepared.result
+        status = prepared.status
+        reason = prepared.reason
+        fills = fill_result.fills if fill_result is not None else ()
+        filled_quantity = fill_result.filled_quantity if fill_result is not None else Decimal("0")
+        remaining_quantity = fill_result.remaining_quantity if fill_result is not None else requested_quantity
+        average_fill_price = fill_result.average_fill_price if fill_result is not None else None
+        notional = fill_result.notional if fill_result is not None else Decimal("0")
+        fee = fill_result.fee if fill_result is not None else Decimal("0")
+        now = self._now().astimezone(timezone.utc)
+        quote_ages = (
+            (
+                Decimal(str((now - quote.market.observed_at).total_seconds())),
+                Decimal(str((now - quote.book.observed_at).total_seconds())),
+            )
+            if quote is not None
+            else ()
+        )
+        if _to_scaled_int(requested_quantity, scale=2, field="requested_quantity") > position_remaining_units:
+            status = "rejected"
+            reason = "exit_quantity_exceeds_remaining_position"
+        elif quote is not None and any(
+            age < -MAX_SOURCE_AGE_SECONDS or age > MAX_SOURCE_AGE_SECONDS for age in quote_ages
+        ):
+            status = "rejected"
+            reason = "market_data_stale_before_commit"
+        elif quote is not None and quote.market.fee_waiver_expiration <= now:
+            status = "rejected"
+            reason = "fee_waiver_expired_before_commit"
+        if status == "rejected":
+            fills = ()
+            filled_quantity = Decimal("0")
+            remaining_quantity = requested_quantity
+            average_fill_price = None
+            notional = Decimal("0")
+            fee = Decimal("0")
+
+        filled_units = _to_scaled_int(filled_quantity, scale=2, field="filled_quantity")
+        sold_after_units = prior_sold_units + filled_units
+        if sold_after_units > entry_quantity_units:
+            raise PaperPositionNotClosable("exit would oversell the paper position")
+        entry_total_units = _to_scaled_int(
+            cast(Decimal, position.entry_notional), scale=18, field="entry_notional"
+        ) + _to_scaled_int(cast(Decimal, position.entry_fee), scale=18, field="entry_fee")
+        prior_cost_units = _to_scaled_int(prior_cost, scale=18, field="prior_position_cost_basis")
+        if sold_after_units == entry_quantity_units:
+            cumulative_cost_units = entry_total_units
+        else:
+            cumulative_cost_units = entry_total_units * sold_after_units // entry_quantity_units
+        position_cost_units = cumulative_cost_units - prior_cost_units
+        notional_units = _to_scaled_int(notional, scale=18, field="notional")
+        fee_units = _to_scaled_int(fee, scale=18, field="fee")
+        realized_pnl_units = notional_units - fee_units - position_cost_units
+        position_cost_basis = _from_scaled_int(position_cost_units, scale=18)
+        realized_pnl = _from_scaled_int(realized_pnl_units, scale=18)
+
+        cash_before = cast(Decimal, account.cash_balance)
+        cash_before_units = _to_scaled_int(cash_before, scale=18, field="cash_balance")
+        cash_after = _from_scaled_int(cash_before_units + notional_units - fee_units, scale=18)
+        account_sequence = int(account.journal_sequence) + 1
+        fee_provenance_json = _canonical_json(dict(quote.market.fee_provenance)) if quote is not None else "{}"
+        decision = KalshiPaperDecision(
+            account_id=account_id,
+            decision_id=decision_id,
+            account_sequence=account_sequence,
+            request_hash=request_hash,
+            action="execute",
+            opportunity_id=resolved.opportunity_id,
+            opportunity_stable_id=resolved.stable_id,
+            opportunity_revision=resolved.revision,
+            opportunity_snapshot_json=resolved.snapshot_json,
+            strategy_key=resolved.strategy_key,
+            strategy_version=resolved.strategy_version,
+            ticker=resolved.ticker,
+            event_ticker=quote.market.event_ticker if quote is not None else None,
+            outcome=resolved.outcome,
+            order_side="sell",
+            position_id=position_id,
+            time_in_force="immediate_or_cancel",
+            requested_quantity=requested_quantity,
+            limit_price=minimum_price,
+            status=status,
+            reason=reason,
+            source_origin=quote.book.source_origin if quote is not None else None,
+            market_observed_at=quote.market.observed_at if quote is not None else None,
+            market_fetched_at=quote.market.fetched_at if quote is not None else None,
+            market_evidence_hash=quote.market.evidence_hash if quote is not None else None,
+            market_evidence_json=quote.market.evidence_json if quote is not None else None,
+            book_observed_at=quote.book.observed_at if quote is not None else None,
+            book_fetched_at=quote.book.fetched_at if quote is not None else None,
+            book_evidence_hash=quote.book.evidence_hash if quote is not None else None,
+            book_evidence_json=quote.book.evidence_json if quote is not None else None,
+            fill_formula_version=(fill_result.formula_version if fill_result is not None else "not_evaluated"),
+            fee_rule_version=(quote.market.fee_rule_version if quote is not None else "not_evaluated"),
+            fee_provenance_json=fee_provenance_json,
+            filled_quantity=filled_quantity,
+            remaining_quantity=remaining_quantity,
+            average_fill_price=average_fill_price,
+            notional=notional,
+            fee=fee,
+            position_cost_basis=position_cost_basis,
+            realized_pnl=realized_pnl,
+            cash_before=cash_before,
+            cash_after=cash_after,
+            created_at=now,
+        )
+        session.add(decision)
+        for fill in fills:
+            session.add(
+                KalshiPaperFill(
+                    account_id=account_id,
+                    decision_id=decision_id,
+                    sequence=fill.sequence,
+                    quantity=fill.quantity,
+                    price=fill.price,
+                    notional=fill.notional,
+                    fee=Decimal("0"),
+                    source_bid_price=fill.source_bid_price,
+                    source_side=fill.source_side,
+                    evidence_json=_canonical_json(
+                        {
+                            "formula_version": fill_result.formula_version if fill_result is not None else "",
+                            "quantity": decimal_string(fill.quantity, scale=2),
+                            "price": decimal_string(fill.price, scale=6),
+                            "notional": decimal_string(fill.notional, scale=8),
+                            "fee": _money18(Decimal("0")),
+                            "source_bid_price": decimal_string(fill.source_bid_price, scale=6),
+                            "source_side": fill.source_side,
+                            "book_evidence_hash": quote.book.evidence_hash if quote is not None else "",
+                            "position_id": position_id,
+                        }
+                    ),
+                    created_at=now,
+                )
+            )
+        account.cash_balance = cash_after
+        account.journal_sequence = account_sequence
+        account.updated_at = now
+        await session.flush()
+        return await self._serialize_decision(session, decision)
+
     async def _commit_prepared(
         self,
         *,
@@ -784,6 +1221,7 @@ class KalshiPaperService:
             event_ticker=quote.market.event_ticker if quote is not None else None,
             outcome=resolved.outcome,
             order_side="buy" if action == "execute" else None,
+            position_id=None,
             time_in_force=time_in_force if action == "execute" else None,
             requested_quantity=requested_quantity,
             limit_price=limit_price,
@@ -806,6 +1244,8 @@ class KalshiPaperService:
             average_fill_price=average_fill_price,
             notional=notional,
             fee=fee,
+            position_cost_basis=None,
+            realized_pnl=None,
             cash_before=cash_before,
             cash_after=cash_after,
             created_at=now,
@@ -835,6 +1275,21 @@ class KalshiPaperService:
                             "book_evidence_hash": quote.book.evidence_hash if quote is not None else "",
                         }
                     ),
+                    created_at=now,
+                )
+            )
+        if action == "execute" and status in {"filled", "partial"} and filled_quantity > 0:
+            position_id = f"paper-position:{_sha256(account_id + chr(0) + decision_id)[:32]}"
+            session.add(
+                KalshiPaperPosition(
+                    account_id=account_id,
+                    position_id=position_id,
+                    entry_decision_id=decision_id,
+                    ticker=resolved.ticker,
+                    outcome=resolved.outcome,
+                    entry_quantity=filled_quantity,
+                    entry_notional=notional,
+                    entry_fee=fee,
                     created_at=now,
                 )
             )
@@ -937,6 +1392,7 @@ class KalshiPaperService:
             "event_ticker": decision.event_ticker,
             "outcome": decision.outcome,
             "order_side": decision.order_side,
+            "position_id": decision.position_id,
             "time_in_force": decision.time_in_force,
             "requested_quantity": (
                 decimal_string(cast(Decimal, decision.requested_quantity), scale=2)
@@ -959,6 +1415,16 @@ class KalshiPaperService:
             ),
             "notional": decimal_string(cast(Decimal, decision.notional), scale=8),
             "fee": _money18(cast(Decimal, decision.fee)),
+            "position_cost_basis": (
+                _money18(cast(Decimal, decision.position_cost_basis))
+                if decision.position_cost_basis is not None
+                else None
+            ),
+            "realized_pnl": (
+                _money18(cast(Decimal, decision.realized_pnl))
+                if decision.realized_pnl is not None
+                else None
+            ),
             "cash_before": _money18(cast(Decimal, decision.cash_before)),
             "cash_after": _money18(cast(Decimal, decision.cash_after)),
             "fill_formula_version": decision.fill_formula_version,
@@ -1015,4 +1481,62 @@ class KalshiPaperService:
             "cancellation_id": cancellation.cancellation_id if cancellation is not None else None,
             "later_matching_supported": False,
             "created_at": order.created_at.isoformat(),
+        }
+
+    @staticmethod
+    async def _serialize_position(session: AsyncSession, position: KalshiPaperPosition) -> dict[str, object]:
+        exits = (
+            await session.execute(
+                select(KalshiPaperDecision)
+                .where(
+                    KalshiPaperDecision.account_id == position.account_id,
+                    KalshiPaperDecision.position_id == position.position_id,
+                    KalshiPaperDecision.order_side == "sell",
+                )
+                .order_by(KalshiPaperDecision.account_sequence.asc())
+            )
+        ).scalars()
+        sold_quantity_units = 0
+        exit_notional_units = 0
+        exit_fee_units = 0
+        allocated_cost_units = 0
+        realized_pnl_units = 0
+        exit_ids: list[str] = []
+        for exit_decision in exits:
+            sold_quantity_units += _to_scaled_int(
+                cast(Decimal, exit_decision.filled_quantity), scale=2, field="filled_quantity"
+            )
+            exit_notional_units += _to_scaled_int(
+                cast(Decimal, exit_decision.notional), scale=18, field="notional"
+            )
+            exit_fee_units += _to_scaled_int(cast(Decimal, exit_decision.fee), scale=18, field="fee")
+            allocated_cost_units += _to_scaled_int(
+                cast(Decimal, exit_decision.position_cost_basis), scale=18, field="position_cost_basis"
+            )
+            realized_pnl_units += _to_scaled_int(
+                cast(Decimal, exit_decision.realized_pnl), scale=18, field="realized_pnl"
+            )
+            exit_ids.append(exit_decision.decision_id)
+        entry_quantity = cast(Decimal, position.entry_quantity)
+        entry_quantity_units = _to_scaled_int(entry_quantity, scale=2, field="entry_quantity")
+        remaining_quantity_units = entry_quantity_units - sold_quantity_units
+        return {
+            "account_id": position.account_id,
+            "position_id": position.position_id,
+            "entry_decision_id": position.entry_decision_id,
+            "ticker": position.ticker,
+            "outcome": position.outcome,
+            "entry_quantity": decimal_string(entry_quantity, scale=2),
+            "entry_notional": _money18(cast(Decimal, position.entry_notional)),
+            "entry_fee": _money18(cast(Decimal, position.entry_fee)),
+            "sold_quantity": decimal_string(_from_scaled_int(sold_quantity_units, scale=2), scale=2),
+            "remaining_quantity": decimal_string(_from_scaled_int(remaining_quantity_units, scale=2), scale=2),
+            "exit_notional": _money18(_from_scaled_int(exit_notional_units, scale=18)),
+            "exit_fee": _money18(_from_scaled_int(exit_fee_units, scale=18)),
+            "allocated_entry_cost": _money18(_from_scaled_int(allocated_cost_units, scale=18)),
+            "realized_pnl": _money18(_from_scaled_int(realized_pnl_units, scale=18)),
+            "status": "closed" if remaining_quantity_units == 0 else "open",
+            "closable": remaining_quantity_units > 0,
+            "exit_decision_ids": exit_ids,
+            "created_at": position.created_at.isoformat(),
         }

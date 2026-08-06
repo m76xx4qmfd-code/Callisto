@@ -371,6 +371,96 @@ def simulate_buy_ioc(
     )
 
 
+def simulate_sell_ioc(
+    *,
+    book: PaperBook,
+    outcome: Outcome,
+    quantity: Decimal,
+    minimum_price: Decimal,
+    price_ranges: tuple[PaperPriceRange, ...],
+) -> PaperFillResult:
+    if outcome not in {"yes", "no"}:
+        raise KalshiPaperProtocolError("outcome must be yes or no")
+    quantity_units = _to_scaled_int(quantity, scale=_QUANTITY_SCALE, field="quantity")
+    if quantity_units <= 0:
+        raise KalshiPaperProtocolError("quantity must be greater than 0")
+    minimum_units = _to_scaled_int(minimum_price, scale=_PRICE_SCALE, field="minimum_price")
+    if minimum_units <= 0 or minimum_units >= 10**_PRICE_SCALE:
+        raise KalshiPaperProtocolError("minimum_price must be greater than 0 and less than 1")
+    if not _price_is_on_tick(minimum_units, price_ranges):
+        raise KalshiPaperProtocolError("minimum_price is not valid for the market price ranges")
+
+    source_levels = book.yes_bids if outcome == "yes" else book.no_bids
+    validated_levels: list[tuple[int, int]] = []
+    for level in source_levels:
+        price_units = _to_scaled_int(level.price, scale=_PRICE_SCALE, field="book price")
+        level_quantity_units = _to_scaled_int(level.quantity, scale=_QUANTITY_SCALE, field="book quantity")
+        if price_units <= 0 or price_units >= 10**_PRICE_SCALE:
+            raise KalshiPaperProtocolError("book price must be greater than 0 and less than 1")
+        if not _price_is_on_tick(price_units, price_ranges):
+            raise KalshiPaperProtocolError("book price is not valid for the market price ranges")
+        if level_quantity_units <= 0:
+            raise KalshiPaperProtocolError("book quantity must be greater than 0")
+        validated_levels.append((price_units, level_quantity_units))
+
+    remaining_units = quantity_units
+    total_notional_units = 0
+    fills: list[PaperFill] = []
+    for price_units, available_units in sorted(validated_levels, reverse=True):
+        if price_units < minimum_units:
+            continue
+        fill_units = min(remaining_units, available_units)
+        if fill_units <= 0:
+            continue
+        fill_notional_units = price_units * fill_units
+        total_notional_units += fill_notional_units
+        fills.append(
+            PaperFill(
+                sequence=len(fills) + 1,
+                quantity=_from_scaled_int(fill_units, scale=_QUANTITY_SCALE),
+                price=_from_scaled_int(price_units, scale=_PRICE_SCALE),
+                notional=_from_scaled_int(fill_notional_units, scale=_PRICE_SCALE + _QUANTITY_SCALE),
+                source_bid_price=_from_scaled_int(price_units, scale=_PRICE_SCALE),
+                source_side=outcome,
+            )
+        )
+        remaining_units -= fill_units
+        if remaining_units == 0:
+            break
+
+    filled_units = quantity_units - remaining_units
+    if filled_units == 0:
+        status: PaperFillStatus = "no_fill"
+        reason = "displayed_owned_depth_empty" if not validated_levels else "minimum_does_not_cross_owned_depth"
+    elif remaining_units == 0:
+        status = "filled"
+        reason = "displayed_owned_depth_filled_ioc"
+    else:
+        status = "partial"
+        reason = "displayed_owned_depth_partially_filled_ioc"
+
+    average_fill_price = None
+    if filled_units:
+        with localcontext() as context:
+            context.prec = max(50, len(str(abs(total_notional_units))) + len(str(abs(filled_units))) + 20)
+            context.rounding = ROUND_HALF_EVEN
+            raw_average = Decimal(total_notional_units) / Decimal(filled_units) / Decimal(10**_PRICE_SCALE)
+            average_fill_price = raw_average.quantize(Decimal("0.000000000000000001"))
+
+    return PaperFillResult(
+        status=status,
+        reason=reason,
+        requested_quantity=_from_scaled_int(quantity_units, scale=_QUANTITY_SCALE),
+        filled_quantity=_from_scaled_int(filled_units, scale=_QUANTITY_SCALE),
+        remaining_quantity=_from_scaled_int(remaining_units, scale=_QUANTITY_SCALE),
+        average_fill_price=average_fill_price,
+        notional=_from_scaled_int(total_notional_units, scale=_PRICE_SCALE + _QUANTITY_SCALE),
+        fee=Decimal("0.000000000000000000"),
+        fills=tuple(fills),
+        formula_version="kalshi-owned-depth-sell-ioc-v1",
+    )
+
+
 class KalshiPaperMarketDataClient:
     def __init__(
         self,

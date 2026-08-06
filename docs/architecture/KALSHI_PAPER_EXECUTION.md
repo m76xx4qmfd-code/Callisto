@@ -30,7 +30,7 @@ Anything outside this narrow contract is rejected without a paper fill or cash m
 
 ## Fill model
 
-Paper orders are buy-only limit orders against one displayed-depth snapshot. The operator chooses immediate-or-cancel (IOC) or local good-till-cancelled (GTC).
+Paper entries are BUY limit orders against one displayed-depth snapshot. The operator chooses immediate-or-cancel (IOC) or local good-till-cancelled (GTC). Filled BUY evidence creates one immutable paper-position lot per entry decision. An operator may close owned quantity from one lot with a paper-only SELL IOC; SELL never creates a short position and cannot exceed quantity remaining before that exit.
 
 Kalshi publishes YES and NO bids. A buy consumes the opposite-side bid ladder using the binary complement:
 
@@ -45,6 +45,8 @@ This release has no post-placement matching worker. A local GTC remainder never 
 
 Price arithmetic uses integer micro-dollars, quantity arithmetic uses integer hundredths, and notional uses their exact integer product. Ambient Python `Decimal` precision cannot change fill or cash results. The deterministic formula version is `kalshi-complementary-depth-ioc-v1`.
 
+A SELL YES consumes displayed YES bids and a SELL NO consumes displayed NO bids, highest qualifying bid first and never below the operator's minimum price. SELL proceeds credit paper cash after the exact exit fee. This capability does not model settlement as a SELL.
+
 ## Durable evidence and replay
 
 Each paper account owns exact USD cash and a monotonic journal sequence. Every operator pass, fill, partial fill, no-fill, and fail-closed market-data rejection creates one immutable decision row. Each displayed-depth fill is an immutable child row.
@@ -53,7 +55,23 @@ Before any Kalshi GET, the service commits an immutable request intent containin
 
 The request key is `(account_id, decision_id)`. A replay with the same canonical immutable input hash returns the committed decision before any market-data GET. A different request under the same key returns a conflict. If a process dies after committing the intent but before committing a terminal decision, the next same-ID retry appends one `expired_after_restart` rejection without a new market-data read or cash mutation. Before the first request leaves the browser, the UI durably freezes the complete payload—including account, opportunity revision, action, quantity, and limit—in local storage. Navigation and reload restore that exact retry payload, and a new decision ID is permitted only after a canonical terminal response resolves the ambiguity.
 
-The final transaction locks the account row, revalidates both market and order-book source freshness plus the fee waiver at the commit timestamp, allocates the next sequence, inserts evidence, validates aggregate fills, debits exact cash, and adds any GTC reservation using 18-decimal scaled integers. Concurrent different decisions for one account serialize at the account row; concurrent identical first requests perform one read-only market-data evaluation and cannot double-debit or over-reserve.
+The final BUY transaction locks the account row, revalidates both market and order-book source freshness plus the fee waiver at the commit timestamp, allocates the next sequence, inserts evidence, validates aggregate fills, debits exact cash, and adds any GTC reservation using 18-decimal scaled integers. Concurrent different decisions for one account serialize at the account row; concurrent identical first requests perform one read-only market-data evaluation and cannot double-debit or over-reserve.
+
+SELL uses the same immutable intent, decision, fill, account-cash, and journal-sequence evidence. It acquires stable decision and position advisory locks in sorted order, commits the intent before the GET-only quote, and locks both the account and immutable position lot for finalization. A same-hash replay returns terminal evidence before another GET. An orphaned SELL intent becomes a durable rejection without evaluating a newer book. Manual close and future stop-loss, take-profit, and settlement controllers must all use this position lock and ledger path.
+
+## Position and realized-P&L accounting
+
+`kalshi_paper_positions` stores immutable opening facts from actual committed BUY fills. It is not a mutable balance table. Current quantity, allocated basis, proceeds, fees, and realized P&L are projections over immutable SELL decisions:
+
+```text
+remaining quantity = entry filled quantity - cumulative SELL filled quantity
+SELL cash after = cash before + gross proceeds - exit fee
+realized P&L = gross proceeds - exit fee - allocated entry cost
+```
+
+Entry cost is BUY notional plus BUY fee. For entry quantity `Q`, entry cost `C`, and cumulative sold quantity `q`, cumulative allocated basis is `C` at full close and otherwise `trunc(C × q / Q, 18)`. Each SELL receives the difference between the new and prior cumulative allocations, so the terminal exit receives the exact residual and total allocated basis equals entry cost. PostgreSQL validates requested quantity against pre-exit ownership, every per-exit allocation in journal order, cumulative quantity and basis conservation, source-side bid evidence, minimum price, fill aggregates, cash, and realized P&L. Closed lots remain visible as historical evidence.
+
+The position API and UI preserve all financial values as canonical decimal strings and are explicitly labeled `PAPER ONLY`. Before a manual SELL leaves the browser, account, position, decision ID, quantity, and minimum price are persisted as one immutable retry identity. An ambiguous response freezes account switching and other paper mutations until an exactly correlated response resolves the attempt.
 
 ## Local cancellation lifecycle
 
@@ -67,4 +85,4 @@ PostgreSQL enforces finite fixed-point scale and sign checks without model-added
 
 ## Explicitly not included
 
-This capability is not a live-readiness claim. It does not include venue writes, demo authentication, fee-bearing markets, paper decreases or amendments, post-placement fills, autonomous paper workers, approved risk policy, session-bound live arming, server-side venue-write leases, or live execution readiness.
+This capability is not a live-readiness claim. It does not include venue writes, demo authentication, fee-bearing markets, paper GTC decreases or amendments, post-placement fills, settlement accounting, stop-loss/take-profit controllers, autonomous paper workers, approved risk policy, session-bound live arming, server-side venue-write leases, or live execution readiness.

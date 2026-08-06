@@ -3108,6 +3108,8 @@ class KalshiPaperIntent(Base):
     strategy_version = Column(Integer, nullable=True)
     ticker = Column(String, nullable=False)
     outcome = Column(String, nullable=False)
+    order_side = Column(String, nullable=True)
+    position_id = Column(String, nullable=True)
     time_in_force = Column(String, nullable=True)
     requested_quantity = Column(Numeric(asdecimal=True), nullable=True)
     limit_price = Column(Numeric(asdecimal=True), nullable=True)
@@ -3129,10 +3131,13 @@ class KalshiPaperIntent(Base):
         CheckConstraint("action IN ('execute', 'pass')", name="ck_kalshi_paper_intents_action"),
         CheckConstraint("outcome IN ('yes', 'no')", name="ck_kalshi_paper_intents_outcome"),
         CheckConstraint(
-            "(action = 'pass' AND time_in_force IS NULL "
+            "(action = 'pass' AND order_side IS NULL AND position_id IS NULL AND time_in_force IS NULL "
             "AND requested_quantity IS NULL AND limit_price IS NULL) OR "
-            "(action = 'execute' AND (time_in_force IS NULL OR "
+            "(action = 'execute' AND ((COALESCE(order_side, 'buy') = 'buy' AND position_id IS NULL "
+            "AND (time_in_force IS NULL OR "
             "time_in_force IN ('immediate_or_cancel', 'good_till_canceled')) "
+            ") OR (order_side = 'sell' AND length(btrim(position_id)) > 0 "
+            "AND time_in_force = 'immediate_or_cancel')) "
             "AND requested_quantity <> 'NaN'::numeric "
             "AND requested_quantity < 'Infinity'::numeric AND requested_quantity > 0 "
             "AND scale(requested_quantity) <= 2 "
@@ -3161,6 +3166,7 @@ class KalshiPaperDecision(Base):
     event_ticker = Column(String, nullable=True)
     outcome = Column(String, nullable=False)
     order_side = Column(String, nullable=True)
+    position_id = Column(String, nullable=True)
     time_in_force = Column(String, nullable=True)
     requested_quantity = Column(Numeric(asdecimal=True), nullable=True)
     limit_price = Column(Numeric(asdecimal=True), nullable=True)
@@ -3183,6 +3189,8 @@ class KalshiPaperDecision(Base):
     average_fill_price = Column(Numeric(asdecimal=True), nullable=True)
     notional = Column(Numeric(asdecimal=True), nullable=False)
     fee = Column(Numeric(asdecimal=True), nullable=False)
+    position_cost_basis = Column(Numeric(asdecimal=True), nullable=True)
+    realized_pnl = Column(Numeric(asdecimal=True), nullable=True)
     cash_before = Column(Numeric(asdecimal=True), nullable=False)
     cash_after = Column(Numeric(asdecimal=True), nullable=False)
     created_at = Column(DateTime, default=_utcnow, nullable=False)
@@ -3227,10 +3235,12 @@ class KalshiPaperDecision(Base):
             name="ck_kalshi_paper_decisions_book_hash",
         ),
         CheckConstraint(
-            "(action = 'pass' AND order_side IS NULL AND time_in_force IS NULL "
+            "(action = 'pass' AND order_side IS NULL AND position_id IS NULL AND time_in_force IS NULL "
             "AND requested_quantity IS NULL AND limit_price IS NULL) OR "
-            "(action = 'execute' AND order_side = 'buy' "
-            "AND time_in_force IN ('immediate_or_cancel', 'good_till_canceled') "
+            "(action = 'execute' AND ((order_side = 'buy' AND position_id IS NULL "
+            "AND time_in_force IN ('immediate_or_cancel', 'good_till_canceled')) OR "
+            "(order_side = 'sell' AND length(btrim(position_id)) > 0 "
+            "AND time_in_force = 'immediate_or_cancel')) "
             "AND requested_quantity <> 'NaN'::numeric AND requested_quantity < 'Infinity'::numeric "
             "AND requested_quantity > 0 AND scale(requested_quantity) <= 2 "
             "AND limit_price <> 'NaN'::numeric AND limit_price > 0 AND limit_price < 1 "
@@ -3259,7 +3269,8 @@ class KalshiPaperDecision(Base):
             "(average_fill_price IS NULL AND filled_quantity = 0) OR "
             "(average_fill_price <> 'NaN'::numeric AND average_fill_price > 0 AND average_fill_price < 1 "
             "AND scale(average_fill_price) <= 18 AND filled_quantity > 0 "
-            "AND average_fill_price <= limit_price)",
+            "AND ((order_side = 'buy' AND average_fill_price <= limit_price) OR "
+            "(order_side = 'sell' AND average_fill_price >= limit_price)))",
             name="ck_kalshi_paper_decisions_average_price",
         ),
         CheckConstraint(
@@ -3268,8 +3279,20 @@ class KalshiPaperDecision(Base):
             name="ck_kalshi_paper_decisions_quantity_conservation",
         ),
         CheckConstraint(
-            "cash_after = cash_before - notional - fee",
+            "(order_side = 'sell' AND cash_after = cash_before + notional - fee) OR "
+            "(order_side IS DISTINCT FROM 'sell' AND cash_after = cash_before - notional - fee)",
             name="ck_kalshi_paper_decisions_cash_conservation",
+        ),
+        CheckConstraint(
+            "(order_side IS DISTINCT FROM 'sell' AND position_cost_basis IS NULL AND realized_pnl IS NULL) OR "
+            "(order_side = 'sell' AND position_cost_basis <> 'NaN'::numeric "
+            "AND position_cost_basis < 'Infinity'::numeric AND position_cost_basis >= 0 "
+            "AND scale(position_cost_basis) <= 18 AND realized_pnl <> 'NaN'::numeric "
+            "AND realized_pnl < 'Infinity'::numeric AND realized_pnl > '-Infinity'::numeric "
+            "AND scale(realized_pnl) <= 18 AND realized_pnl = notional - fee - position_cost_basis "
+            "AND ((filled_quantity = 0 AND position_cost_basis = 0 AND realized_pnl = 0) OR "
+            "(filled_quantity > 0 AND position_cost_basis > 0)))",
+            name="ck_kalshi_paper_decisions_realized_pnl",
         ),
         CheckConstraint(
             "(status = 'filled' AND action = 'execute' AND filled_quantity = requested_quantity "
@@ -3339,6 +3362,47 @@ class KalshiPaperFill(Base):
             "fee <> 'NaN'::numeric AND fee < 'Infinity'::numeric AND fee >= 0 AND scale(fee) <= 18",
             name="ck_kalshi_paper_fills_fee",
         ),
+    )
+
+
+class KalshiPaperPosition(Base):
+    """Immutable opening facts for an exact paper position."""
+
+    __tablename__ = "kalshi_paper_positions"
+
+    account_id = Column(String, primary_key=True)
+    position_id = Column(String, primary_key=True)
+    entry_decision_id = Column(String, nullable=False)
+    ticker = Column(String, nullable=False)
+    outcome = Column(String, nullable=False)
+    entry_quantity = Column(Numeric(asdecimal=True), nullable=False)
+    entry_notional = Column(Numeric(asdecimal=True), nullable=False)
+    entry_fee = Column(Numeric(asdecimal=True), nullable=False)
+    created_at = Column(DateTime, default=_utcnow, nullable=False)
+
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["account_id", "entry_decision_id"],
+            ["kalshi_paper_decisions.account_id", "kalshi_paper_decisions.decision_id"],
+            ondelete="RESTRICT",
+            name="fk_kalshi_paper_positions_entry_decision",
+        ),
+        UniqueConstraint("account_id", "entry_decision_id", name="uq_kalshi_paper_positions_entry_decision"),
+        CheckConstraint("length(btrim(position_id)) > 0", name="ck_kalshi_paper_positions_id"),
+        CheckConstraint("outcome IN ('yes', 'no')", name="ck_kalshi_paper_positions_outcome"),
+        CheckConstraint(
+            "entry_quantity <> 'NaN'::numeric AND entry_quantity < 'Infinity'::numeric "
+            "AND entry_quantity > 0 AND scale(entry_quantity) <= 2",
+            name="ck_kalshi_paper_positions_quantity",
+        ),
+        CheckConstraint(
+            "entry_notional <> 'NaN'::numeric AND entry_notional < 'Infinity'::numeric "
+            "AND entry_notional > 0 AND scale(entry_notional) <= 18 "
+            "AND entry_fee <> 'NaN'::numeric AND entry_fee < 'Infinity'::numeric "
+            "AND entry_fee >= 0 AND scale(entry_fee) <= 18",
+            name="ck_kalshi_paper_positions_money",
+        ),
+        Index("idx_kalshi_paper_positions_account_created", "account_id", "created_at"),
     )
 
 
@@ -3993,6 +4057,8 @@ def _register_paper_intent_validation(table) -> None:  # noqa: ANN001
             CREATE OR REPLACE FUNCTION validate_kalshi_paper_decision_intent()
             RETURNS trigger AS $$
             DECLARE intended kalshi_paper_intents%%ROWTYPE;
+                    fee_provenance jsonb;
+                    fee_provenance_key_count integer;
             BEGIN
                 SELECT * INTO intended
                   FROM kalshi_paper_intents
@@ -4011,6 +4077,11 @@ def _register_paper_intent_validation(table) -> None:  # noqa: ANN001
                    OR NEW.strategy_version IS DISTINCT FROM intended.strategy_version
                    OR NEW.ticker IS DISTINCT FROM intended.ticker
                    OR NEW.outcome IS DISTINCT FROM intended.outcome
+                   OR NEW.order_side IS DISTINCT FROM (
+                      CASE WHEN intended.action = 'execute'
+                           THEN COALESCE(intended.order_side, 'buy')
+                           ELSE NULL END)
+                   OR NEW.position_id IS DISTINCT FROM intended.position_id
                    OR NEW.requested_quantity IS DISTINCT FROM intended.requested_quantity
                    OR NEW.limit_price IS DISTINCT FROM intended.limit_price
                    OR NEW.time_in_force IS DISTINCT FROM (
@@ -4018,6 +4089,35 @@ def _register_paper_intent_validation(table) -> None:  # noqa: ANN001
                            THEN COALESCE(intended.time_in_force, 'immediate_or_cancel')
                            ELSE NULL END) THEN
                     RAISE EXCEPTION 'Kalshi paper decision contradicts immutable intent';
+                END IF;
+                IF NEW.fee IS DISTINCT FROM 0 THEN
+                    RAISE EXCEPTION 'Kalshi paper decision fee contradicts the fee-waiver contract';
+                END IF;
+                fee_provenance := NEW.fee_provenance_json::jsonb;
+                IF NEW.fee_rule_version = 'not_evaluated' THEN
+                    IF fee_provenance IS DISTINCT FROM '{}'::jsonb THEN
+                        RAISE EXCEPTION 'Unevaluated Kalshi paper fee provenance must be empty';
+                    END IF;
+                ELSIF NEW.fee_rule_version = 'kalshi-market-fee-waiver-v1' THEN
+                    SELECT count(*) INTO fee_provenance_key_count
+                      FROM jsonb_object_keys(fee_provenance);
+                    IF jsonb_typeof(fee_provenance) IS DISTINCT FROM 'object'
+                       OR fee_provenance_key_count <> 5
+                       OR fee_provenance->>'kind' IS DISTINCT FROM 'market_fee_waiver'
+                       OR fee_provenance->>'openapi_sha256' IS DISTINCT FROM
+                          '41d93050bf3f692cf3a898ba3a1a033f3e857fee56370ddcb18af6a4225f41cb'
+                       OR NOT COALESCE(fee_provenance->>'market_snapshot_hash', '') ~ '^[0-9a-f]{64}$'
+                       OR fee_provenance->>'market_snapshot_hash' IS DISTINCT FROM NEW.market_evidence_hash
+                       OR (fee_provenance->>'waiver_expiration_time')::timestamptz IS DISTINCT FROM
+                          (NEW.market_evidence_json::jsonb->>'fee_waiver_expiration_time')::timestamptz
+                       OR (fee_provenance->>'observed_at')::timestamptz IS DISTINCT FROM
+                          NEW.market_observed_at AT TIME ZONE 'UTC'
+                       OR length(btrim(COALESCE(fee_provenance->>'waiver_expiration_time', ''))) = 0
+                       OR length(btrim(COALESCE(fee_provenance->>'observed_at', ''))) = 0 THEN
+                        RAISE EXCEPTION 'Kalshi paper fee-waiver provenance is invalid';
+                    END IF;
+                ELSE
+                    RAISE EXCEPTION 'Kalshi paper fee rule is unsupported';
                 END IF;
                 RETURN NEW;
             END;
@@ -4050,6 +4150,7 @@ def _register_paper_fill_validation(table) -> None:  # noqa: ANN001
                 expected_quantity numeric;
                 expected_notional numeric;
                 expected_fee numeric;
+
                 actual_quantity numeric;
                 actual_notional numeric;
                 actual_fee numeric;
@@ -4110,6 +4211,92 @@ def _register_paper_fill_validation(table) -> None:  # noqa: ANN001
             "CREATE CONSTRAINT TRIGGER trg_kalshi_paper_fills_fill_aggregate "
             "AFTER INSERT ON kalshi_paper_fills DEFERRABLE INITIALLY DEFERRED "
             "FOR EACH ROW EXECUTE FUNCTION validate_kalshi_paper_fill_aggregate()"
+        ),
+    )
+    _sa_event.listen(
+        table,
+        "after_create",
+        DDL(
+            """
+            CREATE OR REPLACE FUNCTION validate_kalshi_paper_sell_fill()
+            RETURNS trigger AS $$
+            DECLARE decided kalshi_paper_decisions%%ROWTYPE;
+                    book_evidence jsonb;
+                    fill_evidence jsonb;
+                    fill_evidence_key_count integer;
+                    source_level_count integer;
+                    source_level_quantity numeric;
+                    prior_level_quantity numeric;
+            BEGIN
+                SELECT * INTO decided
+                  FROM kalshi_paper_decisions
+                 WHERE account_id = NEW.account_id AND decision_id = NEW.decision_id;
+                IF NOT FOUND THEN
+                    RAISE EXCEPTION 'Kalshi paper fill decision does not exist';
+                END IF;
+                IF decided.order_side <> 'sell' THEN
+                    RETURN NEW;
+                END IF;
+                IF NEW.source_side IS DISTINCT FROM decided.outcome
+                   OR NEW.source_bid_price IS DISTINCT FROM NEW.price
+                   OR NEW.price < decided.limit_price THEN
+                    RAISE EXCEPTION 'Kalshi paper SELL fill contradicts decision evidence';
+                END IF;
+                    IF decided.market_evidence_json IS NULL OR decided.market_evidence_hash IS NULL
+                    OR decided.book_evidence_json IS NULL OR decided.book_evidence_hash IS NULL
+                    OR encode(sha256(convert_to(decided.market_evidence_json, 'UTF8')), 'hex')
+                        IS DISTINCT FROM decided.market_evidence_hash
+                    OR encode(sha256(convert_to(decided.book_evidence_json, 'UTF8')), 'hex')
+                        IS DISTINCT FROM decided.book_evidence_hash
+                    OR decided.market_evidence_json::jsonb->>'ticker' IS DISTINCT FROM decided.ticker
+                    OR decided.book_evidence_json::jsonb->>'ticker' IS DISTINCT FROM decided.ticker THEN
+                    RAISE EXCEPTION 'Kalshi paper SELL quote evidence is missing or hash-invalid';
+                    END IF;
+                    book_evidence := decided.book_evidence_json::jsonb;
+                    fill_evidence := NEW.evidence_json::jsonb;
+                    SELECT count(*) INTO fill_evidence_key_count FROM jsonb_object_keys(fill_evidence);
+                    IF jsonb_typeof(fill_evidence) IS DISTINCT FROM 'object'
+                    OR fill_evidence_key_count <> 9
+                    OR fill_evidence->>'formula_version' IS DISTINCT FROM decided.fill_formula_version
+                    OR (fill_evidence->>'quantity')::numeric IS DISTINCT FROM NEW.quantity
+                    OR (fill_evidence->>'price')::numeric IS DISTINCT FROM NEW.price
+                    OR (fill_evidence->>'notional')::numeric IS DISTINCT FROM NEW.notional
+                    OR (fill_evidence->>'fee')::numeric IS DISTINCT FROM NEW.fee
+                    OR (fill_evidence->>'source_bid_price')::numeric IS DISTINCT FROM NEW.source_bid_price
+                    OR fill_evidence->>'source_side' IS DISTINCT FROM NEW.source_side
+                    OR fill_evidence->>'book_evidence_hash' IS DISTINCT FROM decided.book_evidence_hash
+                    OR fill_evidence->>'position_id' IS DISTINCT FROM decided.position_id THEN
+                    RAISE EXCEPTION 'Kalshi paper SELL fill JSON contradicts immutable fill evidence';
+                    END IF;
+                    SELECT count(*), max((level->>1)::numeric)
+                    INTO source_level_count, source_level_quantity
+                    FROM jsonb_array_elements(
+                        CASE WHEN decided.outcome = 'yes' THEN book_evidence->'yes_dollars'
+                             ELSE book_evidence->'no_dollars' END
+                    ) level
+                    WHERE jsonb_typeof(level) = 'array' AND jsonb_array_length(level) = 2
+                    AND (level->>0)::numeric = NEW.price;
+                    SELECT COALESCE(sum(f.quantity), 0) INTO prior_level_quantity
+                    FROM kalshi_paper_fills f
+                    WHERE f.account_id = NEW.account_id AND f.decision_id = NEW.decision_id
+                    AND f.price = NEW.price;
+                    IF source_level_count <> 1
+                    OR prior_level_quantity + NEW.quantity > source_level_quantity THEN
+                    RAISE EXCEPTION 'Kalshi paper SELL fill exceeds immutable source book depth';
+                    END IF;
+                    RETURN NEW;
+            END;
+            $$ LANGUAGE plpgsql
+            """
+        ),
+    )
+    _sa_event.listen(
+        table,
+        "after_create",
+        DDL(
+            "CREATE TRIGGER trg_kalshi_paper_fills_validate_sell_evidence "
+            "BEFORE INSERT ON kalshi_paper_fills FOR EACH ROW "
+            "EXECUTE FUNCTION validate_kalshi_paper_sell_fill()"
         ),
     )
 
@@ -4295,6 +4482,142 @@ def _register_paper_order_lifecycle_validation(account_table, order_table, cance
         )
 
 
+def _register_paper_position_validation(account_table, decision_table, position_table) -> None:  # noqa: ANN001
+    function_ddl = DDL(
+        """
+        CREATE OR REPLACE FUNCTION validate_kalshi_paper_positions()
+        RETURNS trigger AS $$
+        DECLARE
+            target_account_id text;
+            broken_entries bigint;
+            broken_positions bigint;
+            broken_exits bigint;
+        BEGIN
+            target_account_id := NEW.account_id;
+            SELECT count(*) INTO broken_entries
+              FROM kalshi_paper_decisions d
+             WHERE d.account_id = target_account_id
+               AND d.action = 'execute' AND d.order_side = 'buy' AND d.filled_quantity > 0
+               AND (SELECT count(*) FROM kalshi_paper_positions p
+                     WHERE p.account_id = d.account_id AND p.entry_decision_id = d.decision_id
+                       AND p.ticker = d.ticker AND p.outcome = d.outcome
+                       AND p.entry_quantity = d.filled_quantity
+                       AND p.entry_notional = d.notional AND p.entry_fee = d.fee) <> 1;
+            IF broken_entries <> 0 THEN
+                RAISE EXCEPTION 'Kalshi paper filled entry does not have exact position evidence';
+            END IF;
+
+            SELECT count(*) INTO broken_positions
+              FROM kalshi_paper_positions p
+             WHERE p.account_id = target_account_id
+               AND NOT EXISTS (
+                   SELECT 1 FROM kalshi_paper_decisions d
+                    WHERE d.account_id = p.account_id AND d.decision_id = p.entry_decision_id
+                      AND d.action = 'execute' AND d.order_side = 'buy' AND d.filled_quantity > 0
+                      AND d.ticker = p.ticker AND d.outcome = p.outcome
+                      AND d.filled_quantity = p.entry_quantity
+                      AND d.notional = p.entry_notional AND d.fee = p.entry_fee
+               );
+            IF broken_positions <> 0 THEN
+                RAISE EXCEPTION 'Kalshi paper position contradicts immutable entry evidence';
+            END IF;
+
+            SELECT count(*) INTO broken_exits
+              FROM kalshi_paper_positions p
+              LEFT JOIN LATERAL (
+                  SELECT COALESCE(sum(d.filled_quantity), 0) AS sold_quantity,
+                         COALESCE(sum(d.position_cost_basis), 0) AS allocated_cost
+                    FROM kalshi_paper_decisions d
+                   WHERE d.account_id = p.account_id AND d.position_id = p.position_id
+                     AND d.action = 'execute' AND d.order_side = 'sell'
+              ) exits ON true
+             WHERE p.account_id = target_account_id
+               AND (
+                   exits.sold_quantity > p.entry_quantity
+                   OR exits.allocated_cost IS DISTINCT FROM (
+                       CASE WHEN exits.sold_quantity = p.entry_quantity
+                            THEN p.entry_notional + p.entry_fee
+                            ELSE trunc((p.entry_notional + p.entry_fee)
+                                       * exits.sold_quantity / p.entry_quantity, 18) END
+                   )
+                   OR EXISTS (
+                       SELECT 1 FROM kalshi_paper_decisions d
+                        WHERE d.account_id = p.account_id AND d.position_id = p.position_id
+                          AND d.action = 'execute' AND d.order_side = 'sell'
+                          AND (d.ticker IS DISTINCT FROM p.ticker OR d.outcome IS DISTINCT FROM p.outcome)
+                   )
+                   OR EXISTS (
+                       SELECT 1
+                         FROM (
+                           SELECT d.position_cost_basis,
+                                  d.filled_quantity,
+                                  d.requested_quantity,
+                                  COALESCE(
+                                    sum(d.filled_quantity) OVER (
+                                      ORDER BY d.account_sequence
+                                      ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING
+                                    ), 0
+                                  ) AS prior_sold
+                             FROM kalshi_paper_decisions d
+                            WHERE d.account_id = p.account_id
+                              AND d.position_id = p.position_id
+                              AND d.action = 'execute' AND d.order_side = 'sell'
+                         ) exit_row
+                        WHERE exit_row.filled_quantity > p.entry_quantity - exit_row.prior_sold
+                           OR exit_row.position_cost_basis IS DISTINCT FROM (
+                          CASE WHEN exit_row.prior_sold + exit_row.filled_quantity = p.entry_quantity
+                               THEN p.entry_notional + p.entry_fee
+                               ELSE trunc((p.entry_notional + p.entry_fee)
+                                          * (exit_row.prior_sold + exit_row.filled_quantity)
+                                          / p.entry_quantity, 18) END
+                          - CASE WHEN exit_row.prior_sold = p.entry_quantity
+                                 THEN p.entry_notional + p.entry_fee
+                                 ELSE trunc((p.entry_notional + p.entry_fee)
+                                            * exit_row.prior_sold / p.entry_quantity, 18) END
+                        )
+                   )
+               );
+            IF broken_exits <> 0 THEN
+                RAISE EXCEPTION 'Kalshi paper exits contradict position quantity or cost basis';
+            END IF;
+
+            IF EXISTS (
+                SELECT 1 FROM kalshi_paper_decisions d
+                 WHERE d.account_id = target_account_id AND d.order_side = 'sell'
+                   AND NOT EXISTS (
+                       SELECT 1 FROM kalshi_paper_positions p
+                        WHERE p.account_id = d.account_id AND p.position_id = d.position_id
+                   )
+            ) THEN
+                RAISE EXCEPTION 'Kalshi paper exit position does not exist';
+            END IF;
+            RETURN NEW;
+        END;
+        $$ LANGUAGE plpgsql
+        """
+    )
+    for table in (account_table, decision_table, position_table):
+        _sa_event.listen(table, "after_create", function_ddl)
+    _sa_event.listen(
+        position_table,
+        "after_create",
+        DDL(
+            "CREATE CONSTRAINT TRIGGER trg_kalshi_paper_positions_validate "
+            "AFTER INSERT ON kalshi_paper_positions DEFERRABLE INITIALLY DEFERRED "
+            "FOR EACH ROW EXECUTE FUNCTION validate_kalshi_paper_positions()"
+        ),
+    )
+    _sa_event.listen(
+        decision_table,
+        "after_create",
+        DDL(
+            "CREATE CONSTRAINT TRIGGER trg_kalshi_paper_decisions_validate_positions "
+            "AFTER INSERT ON kalshi_paper_decisions DEFERRABLE INITIALLY DEFERRED "
+            "FOR EACH ROW EXECUTE FUNCTION validate_kalshi_paper_positions()"
+        ),
+    )
+
+
 def _register_immutable_ledger_table(table) -> None:  # noqa: ANN001
     table.info["immutable_rows"] = True
     _sa_event.listen(
@@ -4445,6 +4768,12 @@ _register_immutable_paper_table(KalshiPaperDecision.__table__)
 _register_paper_intent_validation(KalshiPaperDecision.__table__)
 _register_immutable_paper_table(KalshiPaperFill.__table__)
 _register_paper_fill_validation(KalshiPaperFill.__table__)
+_register_immutable_paper_table(KalshiPaperPosition.__table__)
+_register_paper_position_validation(
+    KalshiPaperAccount.__table__,
+    KalshiPaperDecision.__table__,
+    KalshiPaperPosition.__table__,
+)
 _register_paper_account_journal_validation(KalshiPaperAccount.__table__, KalshiPaperDecision.__table__)
 _register_immutable_paper_table(KalshiPaperOrder.__table__)
 _register_immutable_paper_table(KalshiPaperCancellation.__table__)

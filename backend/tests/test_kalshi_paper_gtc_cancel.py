@@ -290,7 +290,8 @@ async def test_database_rejects_gtc_decision_forged_from_ioc_intent() -> None:
                     "INSERT INTO kalshi_paper_intents "
                     "SELECT account_id, 'forged-tif', :request_hash, action, opportunity_id, "
                     "opportunity_stable_id, opportunity_revision, opportunity_snapshot_json, strategy_key, "
-                    "strategy_version, ticker, outcome, 'immediate_or_cancel', requested_quantity, limit_price, "
+                    "strategy_version, ticker, outcome, order_side, position_id, 'immediate_or_cancel', "
+                    "requested_quantity, limit_price, "
                     "created_at "
                     "FROM kalshi_paper_intents WHERE decision_id = 'ioc-cause'"
                 ),
@@ -303,12 +304,14 @@ async def test_database_rejects_gtc_decision_forged_from_ioc_intent() -> None:
                         "INSERT INTO kalshi_paper_decisions "
                         "SELECT account_id, 'forged-tif', 2, :request_hash, action, opportunity_id, "
                         "opportunity_stable_id, opportunity_revision, opportunity_snapshot_json, strategy_key, "
-                        "strategy_version, ticker, event_ticker, outcome, order_side, 'good_till_canceled', "
+                        "strategy_version, ticker, event_ticker, outcome, order_side, position_id, "
+                        "'good_till_canceled', "
                         "requested_quantity, limit_price, status, reason, source_origin, market_observed_at, "
                         "market_fetched_at, market_evidence_hash, market_evidence_json, book_observed_at, "
                         "book_fetched_at, book_evidence_hash, book_evidence_json, fill_formula_version, "
                         "fee_rule_version, fee_provenance_json, filled_quantity, remaining_quantity, "
-                        "average_fill_price, notional, fee, cash_before, cash_after, created_at "
+                        "average_fill_price, notional, fee, position_cost_basis, realized_pnl, "
+                        "cash_before, cash_after, created_at "
                         "FROM kalshi_paper_decisions WHERE decision_id = 'ioc-cause'"
                     ),
                     {"request_hash": forged_hash},

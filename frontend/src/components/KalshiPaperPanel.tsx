@@ -8,12 +8,15 @@ import { Badge } from './ui/badge'
 import {
   cancelKalshiPaperOrder,
   createKalshiPaperAccount,
+  exitKalshiPaperPosition,
   getKalshiPaperAccounts,
   getKalshiPaperDecisions,
   getKalshiPaperEligibility,
   getKalshiPaperOrders,
+  getKalshiPaperPositions,
   requireKalshiPaperCancellationInput,
   requireKalshiPaperDecisionInput,
+  requireKalshiPaperPositionExitInput,
   recordKalshiPaperDecision,
 } from '../services/apiKalshiPaper'
 import type {
@@ -21,10 +24,12 @@ import type {
   KalshiPaperDecision,
   KalshiPaperDecisionInput,
   KalshiPaperEligibility,
+  KalshiPaperPositionExitInput,
 } from '../services/apiKalshiPaper'
 
 const PENDING_ATTEMPT_KEY = 'callisto:kalshi-paper:pending-attempt'
 const PENDING_CANCELLATION_KEY = 'callisto:kalshi-paper:pending-cancellation'
+const PENDING_POSITION_EXIT_KEY = 'callisto:kalshi-paper:pending-position-exit'
 
 function newDecisionId(): string {
   return `paper:${crypto.randomUUID()}`
@@ -50,6 +55,16 @@ function loadPendingCancellation(): KalshiPaperCancellationInput | null {
   }
 }
 
+function loadPendingPositionExit(): KalshiPaperPositionExitInput | null {
+  const stored = localStorage.getItem(PENDING_POSITION_EXIT_KEY)
+  if (stored === null) return null
+  try {
+    return requireKalshiPaperPositionExitInput(JSON.parse(stored))
+  } catch {
+    return null
+  }
+}
+
 function errorMessage(error: unknown): string {
   if (error && typeof error === 'object' && 'response' in error) {
     const response = (error as { response?: { data?: { detail?: unknown } } }).response
@@ -70,8 +85,9 @@ export default function KalshiPaperPanel() {
   const queryClient = useQueryClient()
   const [pendingAttempt, setPendingAttempt] = useState<KalshiPaperDecisionInput | null>(loadPendingAttempt)
   const [pendingCancellation, setPendingCancellation] = useState<KalshiPaperCancellationInput | null>(loadPendingCancellation)
+  const [pendingPositionExit, setPendingPositionExit] = useState<KalshiPaperPositionExitInput | null>(loadPendingPositionExit)
   const [selectedAccountId, setSelectedAccountId] = useState(
-    pendingAttempt?.account_id ?? pendingCancellation?.account_id ?? '',
+    pendingAttempt?.account_id ?? pendingCancellation?.account_id ?? pendingPositionExit?.account_id ?? '',
   )
   const [accountName, setAccountName] = useState('Kalshi Paper')
   const [startingCash, setStartingCash] = useState('10000.00')
@@ -84,6 +100,9 @@ export default function KalshiPaperPanel() {
   )
   const [decisionId, setDecisionId] = useState(pendingAttempt?.decision_id ?? newDecisionId)
   const [lastDecision, setLastDecision] = useState<KalshiPaperDecision | null>(null)
+  const [selectedPositionId, setSelectedPositionId] = useState(pendingPositionExit?.position_id ?? '')
+  const [exitQuantity, setExitQuantity] = useState(pendingPositionExit?.quantity ?? '')
+  const [minimumExitPrice, setMinimumExitPrice] = useState(pendingPositionExit?.minimum_price ?? '0.010000')
 
   const accountsQuery = useQuery({
     queryKey: ['kalshi-paper-accounts'],
@@ -108,6 +127,12 @@ export default function KalshiPaperPanel() {
     enabled: Boolean(activeAccountId),
     refetchInterval: 10000,
   })
+  const positionsQuery = useQuery({
+    queryKey: ['kalshi-paper-positions', activeAccountId],
+    queryFn: () => getKalshiPaperPositions(activeAccountId),
+    enabled: Boolean(activeAccountId),
+    refetchInterval: 10000,
+  })
 
   const createAccount = useMutation({
     mutationFn: () => createKalshiPaperAccount({ name: accountName, starting_cash: startingCash }),
@@ -115,6 +140,7 @@ export default function KalshiPaperPanel() {
       if (
         localStorage.getItem(PENDING_ATTEMPT_KEY) === null
         && localStorage.getItem(PENDING_CANCELLATION_KEY) === null
+        && localStorage.getItem(PENDING_POSITION_EXIT_KEY) === null
       ) setSelectedAccountId(account.id)
       await queryClient.invalidateQueries({ queryKey: ['kalshi-paper-accounts'] })
     },
@@ -125,6 +151,7 @@ export default function KalshiPaperPanel() {
       if (
         localStorage.getItem(PENDING_ATTEMPT_KEY) !== null
         || localStorage.getItem(PENDING_CANCELLATION_KEY) !== null
+        || localStorage.getItem(PENDING_POSITION_EXIT_KEY) !== null
       ) return
       setEligibility(result)
       setDecisionId(newDecisionId())
@@ -180,6 +207,36 @@ export default function KalshiPaperPanel() {
       ])
     },
   })
+  const exitPosition = useMutation({
+    mutationFn: (positionId?: string) => {
+      let payload = pendingPositionExit
+      if (payload === null) {
+        if (!activeAccountId || !positionId) throw new Error('An authoritative open position is required')
+        payload = {
+          account_id: activeAccountId,
+          position_id: positionId,
+          decision_id: `paper-exit:${crypto.randomUUID()}`,
+          quantity: exitQuantity,
+          minimum_price: minimumExitPrice,
+        }
+        requireKalshiPaperPositionExitInput(payload)
+        localStorage.setItem(PENDING_POSITION_EXIT_KEY, JSON.stringify(payload))
+        setPendingPositionExit(payload)
+      }
+      return exitKalshiPaperPosition(payload)
+    },
+    onSuccess: async () => {
+      localStorage.removeItem(PENDING_POSITION_EXIT_KEY)
+      setPendingPositionExit(null)
+      setSelectedPositionId('')
+      setExitQuantity('')
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ['kalshi-paper-accounts'] }),
+        queryClient.invalidateQueries({ queryKey: ['kalshi-paper-decisions', activeAccountId] }),
+        queryClient.invalidateQueries({ queryKey: ['kalshi-paper-positions', activeAccountId] }),
+      ])
+    },
+  })
 
   const startNewDecision = () => {
     localStorage.removeItem(PENDING_ATTEMPT_KEY)
@@ -193,9 +250,14 @@ export default function KalshiPaperPanel() {
     localStorage.getItem(PENDING_ATTEMPT_KEY) !== null && pendingAttempt === null
   ) || (
     localStorage.getItem(PENDING_CANCELLATION_KEY) !== null && pendingCancellation === null
+  ) || (
+    localStorage.getItem(PENDING_POSITION_EXIT_KEY) !== null && pendingPositionExit === null
   )
-  const inputFrozen = pendingAttempt !== null || pendingCancellation !== null || unreadableRetryState
-  const authoritativeError = Boolean(accountsQuery.error || ordersQuery.error)
+  const inputFrozen = pendingAttempt !== null
+    || pendingCancellation !== null
+    || pendingPositionExit !== null
+    || unreadableRetryState
+  const authoritativeError = Boolean(accountsQuery.error || ordersQuery.error || positionsQuery.error)
   const canEvaluate = Boolean(activeAccountId && eligibility && !authoritativeError)
     && !inputFrozen
     && !recordDecision.isPending
@@ -206,14 +268,14 @@ export default function KalshiPaperPanel() {
         <div className="flex items-start gap-2">
           <ShieldCheck className="mt-0.5 h-4 w-4 shrink-0 text-blue-300" />
           <div>
-            <p className="text-sm font-semibold text-blue-200">Kalshi-native paper execution</p>
+            <p className="text-sm font-semibold text-blue-200">Kalshi-native paper execution — PAPER ONLY</p>
             <p className="mt-1 text-xs text-blue-100/80">
               This desk performs read-only production market-data GETs and writes only local paper evidence.
               It has no signer, credential input, venue order route, worker, or automatic startup behavior.
             </p>
             <p className="mt-1 text-xs text-amber-200">
-              Current scope is intentionally narrow: buy-only IOC or local GTC opening against one current depth
-              snapshot and an active market-specific fee waiver. GTC remainders do not match later.
+              Current scope is intentionally narrow: local BUY IOC/GTC openings and owned-position SELL IOC exits
+              against one current depth snapshot under an active market-specific fee waiver. GTC remainders do not match later.
             </p>
           </div>
         </div>
@@ -398,6 +460,113 @@ export default function KalshiPaperPanel() {
           </CardContent>
         </Card>
       </div>
+
+      <Card className="border-border bg-card/50 shadow-none">
+        <CardContent className="p-0">
+          <div className="border-b border-border/60 px-3 py-2.5">
+            <p className="text-sm font-medium">Authoritative paper positions — PAPER ONLY</p>
+            <p className="text-[11px] text-muted-foreground">
+              Every row is one immutable BUY lot. SELL IOC exits consume only the held outcome&apos;s current bids.
+            </p>
+          </div>
+          {pendingPositionExit && (
+            <div className="border-b border-amber-500/30 bg-amber-500/10 p-3 text-xs text-amber-200">
+              <p>SELL IOC outcome unknown. All paper mutations and account switching remain frozen.</p>
+              <Button
+                className="mt-2"
+                size="sm"
+                disabled={exitPosition.isPending}
+                onClick={() => exitPosition.mutate(undefined)}
+              >
+                <RotateCcw className="mr-1.5 h-3.5 w-3.5" />
+                Retry same immutable SELL IOC
+              </Button>
+            </div>
+          )}
+          {exitPosition.error && (
+            <p className="border-b border-red-500/30 bg-red-500/10 p-3 text-xs text-red-200">
+              {errorMessage(exitPosition.error)} The same position, quantity, price, and decision ID are retained for a safe retry.
+            </p>
+          )}
+          {positionsQuery.error ? (
+            <p className="p-4 text-xs text-amber-300">
+              Position refresh failed. Cached positions are hidden and SELL is disabled until refresh recovers.
+            </p>
+          ) : (positionsQuery.data?.length ?? 0) === 0 ? (
+            <p className="p-6 text-center text-xs text-muted-foreground">No paper positions for this account.</p>
+          ) : (
+            <div className="overflow-auto">
+              <table className="w-full min-w-[1050px] text-xs">
+                <thead className="border-b border-border/60 text-muted-foreground">
+                  <tr>
+                    <th className="px-3 py-2 text-left">Market</th>
+                    <th className="px-3 py-2 text-left">State</th>
+                    <th className="px-3 py-2 text-right">Entry</th>
+                    <th className="px-3 py-2 text-right">Sold</th>
+                    <th className="px-3 py-2 text-right">Open</th>
+                    <th className="px-3 py-2 text-right">Entry notional</th>
+                    <th className="px-3 py-2 text-right">Realized P&amp;L</th>
+                    <th className="px-3 py-2 text-right">Paper action</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {(positionsQuery.data ?? []).map((position) => (
+                    <tr key={position.position_id} className="border-b border-border/40">
+                      <td className="px-3 py-2 font-mono">{position.ticker} {position.outcome.toUpperCase()}</td>
+                      <td className="px-3 py-2"><Badge variant="outline">{position.status}</Badge></td>
+                      <td className="px-3 py-2 text-right font-mono">{position.entry_quantity}</td>
+                      <td className="px-3 py-2 text-right font-mono">{position.sold_quantity}</td>
+                      <td className="px-3 py-2 text-right font-mono">{position.remaining_quantity}</td>
+                      <td className="px-3 py-2 text-right font-mono" title={`Entry fee $${position.entry_fee}`}>${position.entry_notional}</td>
+                      <td className="px-3 py-2 text-right font-mono">${position.realized_pnl}</td>
+                      <td className="px-3 py-2 text-right">
+                        {position.status === 'open' && selectedPositionId !== position.position_id && (
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            disabled={inputFrozen || authoritativeError}
+                            onClick={() => {
+                              setSelectedPositionId(position.position_id)
+                              setExitQuantity(position.remaining_quantity)
+                            }}
+                          >
+                            Prepare SELL IOC
+                          </Button>
+                        )}
+                        {position.status === 'open' && selectedPositionId === position.position_id && (
+                          <div className="ml-auto grid w-[360px] grid-cols-[90px_110px_1fr] gap-1.5">
+                            <Input
+                              aria-label={`SELL quantity ${position.position_id}`}
+                              value={exitQuantity}
+                              disabled={inputFrozen}
+                              onChange={(event) => setExitQuantity(event.target.value)}
+                              inputMode="decimal"
+                            />
+                            <Input
+                              aria-label={`Minimum SELL price ${position.position_id}`}
+                              value={minimumExitPrice}
+                              disabled={inputFrozen}
+                              onChange={(event) => setMinimumExitPrice(event.target.value)}
+                              inputMode="decimal"
+                            />
+                            <Button
+                              size="sm"
+                              disabled={inputFrozen || authoritativeError || !exitQuantity || !minimumExitPrice || exitPosition.isPending}
+                              onClick={() => exitPosition.mutate(position.position_id)}
+                            >
+                              SELL IOC — PAPER ONLY
+                            </Button>
+                          </div>
+                        )}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </CardContent>
+      </Card>
 
       <Card className="border-border bg-card/50 shadow-none">
         <CardContent className="p-0">
