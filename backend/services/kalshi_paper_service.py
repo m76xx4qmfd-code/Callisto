@@ -6,7 +6,7 @@ import json
 import re
 import uuid
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from typing import Literal, Protocol, cast
@@ -476,6 +476,17 @@ class KalshiPaperService:
                                 limit_price=parsed_limit,
                                 price_ranges=quote.market.price_ranges,
                             )
+                            if time_in_force == "good_till_canceled":
+                                result = replace(
+                                    result,
+                                    reason={
+                                        "displayed_depth_filled_ioc": "displayed_depth_filled_gtc_open",
+                                        "displayed_depth_partially_filled_ioc": (
+                                            "displayed_depth_partially_filled_gtc_open"
+                                        ),
+                                    }.get(result.reason, result.reason),
+                                    formula_version="kalshi-complementary-depth-gtc-open-v1",
+                                )
                             prepared = _PreparedDecision(
                                 quote=quote,
                                 result=result,

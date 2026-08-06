@@ -47,6 +47,8 @@ async def test_gtc_partial_opens_and_reserves_exact_remainder_without_changing_i
         opened = await _open_gtc(service, account_id=account["id"], decision_id="gtc-partial")
         assert opened["time_in_force"] == "good_till_canceled"
         assert opened["status"] == "partial"
+        assert opened["reason"] == "displayed_depth_partially_filled_gtc_open"
+        assert opened["fill_formula_version"] == "kalshi-complementary-depth-gtc-open-v1"
         assert opened["filled_quantity"] == "5.00"
         assert opened["remaining_quantity"] == "1.00"
         assert opened["order_id"]
@@ -99,6 +101,8 @@ async def test_gtc_no_cross_reserves_limit_notional_and_exact_math_ignores_decim
             getcontext().rounding = original.rounding
             getcontext().traps = original.traps
         assert opened["status"] == "no_fill"
+        assert opened["reason"] == "displayed_depth_empty"
+        assert opened["fill_formula_version"] == "kalshi-complementary-depth-gtc-open-v1"
         assert opened["reserved_cash"] == "12299999999999999999.998770000000000000"
         async with factory() as session:
             stored = await session.get(KalshiPaperAccount, account["id"])
@@ -257,6 +261,56 @@ async def test_database_rejects_order_facts_that_contradict_causal_decision() ->
                         "'good_till_canceled', 1, 1, 0, 0.6, 'filled', 0, now())"
                     ),
                     {"account_id": account["id"], "ticker": decision["ticker"]},
+                )
+                await session.commit()
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.db
+@pytest.mark.asyncio
+async def test_database_rejects_gtc_decision_forged_from_ioc_intent() -> None:
+    engine, factory, _market_data, service = await _build("paper_gtc_intent_tif_guard")
+    try:
+        account = await service.create_account(name="Intent TIF guard", starting_cash="10.00")
+        eligibility = await service.get_eligibility("opp-detection")
+        await service.record_decision(
+            account_id=str(account["id"]),
+            decision_id="ioc-cause",
+            opportunity_id="opp-detection",
+            opportunity_revision=str(eligibility["opportunity_revision"]),
+            action="execute",
+            quantity="1.00",
+            limit_price="0.600000",
+        )
+        forged_hash = "e" * 64
+        async with factory() as session, session.begin():
+            await session.execute(
+                text(
+                    "INSERT INTO kalshi_paper_intents "
+                    "SELECT account_id, 'forged-tif', :request_hash, action, opportunity_id, "
+                    "opportunity_stable_id, opportunity_revision, opportunity_snapshot_json, strategy_key, "
+                    "strategy_version, ticker, outcome, time_in_force, requested_quantity, limit_price, created_at "
+                    "FROM kalshi_paper_intents WHERE decision_id = 'ioc-cause'"
+                ),
+                {"request_hash": forged_hash},
+            )
+        async with factory() as session:
+            with pytest.raises(DBAPIError, match="contradicts immutable intent"):
+                await session.execute(
+                    text(
+                        "INSERT INTO kalshi_paper_decisions "
+                        "SELECT account_id, 'forged-tif', 2, :request_hash, action, opportunity_id, "
+                        "opportunity_stable_id, opportunity_revision, opportunity_snapshot_json, strategy_key, "
+                        "strategy_version, ticker, event_ticker, outcome, order_side, 'good_till_canceled', "
+                        "requested_quantity, limit_price, status, reason, source_origin, market_observed_at, "
+                        "market_fetched_at, market_evidence_hash, market_evidence_json, book_observed_at, "
+                        "book_fetched_at, book_evidence_hash, book_evidence_json, fill_formula_version, "
+                        "fee_rule_version, fee_provenance_json, filled_quantity, remaining_quantity, "
+                        "average_fill_price, notional, fee, cash_before, cash_after, created_at "
+                        "FROM kalshi_paper_decisions WHERE decision_id = 'ioc-cause'"
+                    ),
+                    {"request_hash": forged_hash},
                 )
                 await session.commit()
     finally:

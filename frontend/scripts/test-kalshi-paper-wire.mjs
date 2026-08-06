@@ -141,6 +141,7 @@ assert.throws(() => requireKalshiPaperDecision({ ...decision, status: 'unknown' 
 assert.throws(() => requireKalshiPaperDecision({ ...decision, reason: null }), /text is required/i)
 assert.throws(() => requireKalshiPaperDecision({ ...decision, book_evidence_hash: 'bad' }), /sha-256/i)
 assert.throws(() => requireKalshiPaperEligibility({ ...eligibility, order_side: 'sell' }), /enum/i)
+assert.throws(() => requireKalshiPaperEligibility({ ...eligibility, unexpected: true }), /unknown .* field/i)
 assert.throws(() => requireKalshiPaperDecisionInput({ ...pendingAttempt, action: 'pass' }), /cannot include/i)
 assert.throws(() => requireKalshiPaperDecisionInput({ ...pendingAttempt, unexpected: 'value' }), /unknown field/i)
 assert.throws(() => requireKalshiPaperOrder({ ...order, later_matching_supported: true }), /later matching/i)

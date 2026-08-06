@@ -241,6 +241,10 @@ export function requireKalshiPaperAccount(value: unknown): KalshiPaperAccount {
 
 export function requireKalshiPaperEligibility(value: unknown): KalshiPaperEligibility {
   const eligibility = requireObject(value, 'eligibility')
+  rejectUnknownFields(eligibility, [
+    'opportunity_id', 'opportunity_stable_id', 'opportunity_revision', 'strategy_key',
+    'strategy_version', 'ticker', 'outcome', 'order_side', 'time_in_force',
+  ], 'eligibility')
   requireTextValue(eligibility, 'opportunity_id', 'eligibility')
   requireTextValue(eligibility, 'opportunity_stable_id', 'eligibility')
   requireSha256(eligibility, 'opportunity_revision', 'eligibility')
