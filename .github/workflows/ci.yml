@@ -38,10 +38,20 @@ jobs:
         working-directory: ${{ github.workspace }}
         run: python scripts/ci/check_no_hardcoded_fill_constants.py
 
-  backend-test:
-    name: Backend Tests
+  backend-test-shard:
+    name: Backend Tests (${{ matrix.label }})
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - index: 0
+            label: 1/3
+          - index: 1
+            label: 2/3
+          - index: 2
+            label: 3/3
     services:
       postgres:
         image: postgres:16-alpine
@@ -76,7 +86,27 @@ jobs:
       - name: Run tests
         env:
           DATABASE_URL: postgresql+asyncpg://postgres:postgres@127.0.0.1:5432/homerun
-        run: python -m pytest tests/ -v --tb=short --timeout=60
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          import pytest
+
+          test_files = sorted(str(path) for path in Path("tests").rglob("test_*.py"))
+          selected_files = test_files[${{ matrix.index }}::3]
+          raise SystemExit(pytest.main([*selected_files, "-v", "--tb=short", "--timeout=60"]))
+          PY
+
+  backend-test:
+    name: Backend Tests
+    needs: backend-test-shard
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require every backend shard
+        env:
+          SHARD_RESULT: ${{ needs.backend-test-shard.result }}
+        run: test "$SHARD_RESULT" = "success"
 
   frontend-lint:
     name: Frontend Lint & Type Check
