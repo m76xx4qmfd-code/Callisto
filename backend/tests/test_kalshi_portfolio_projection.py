@@ -192,7 +192,7 @@ async def test_projection_exact_membership_fixed_point_empty_and_principal_isola
         async with sf() as session, session.begin():
             projection_lease = await session.get(KalshiPortfolioProjectionLease, principal)
             assert projection_lease is not None
-            projection_lease.expires_at = datetime.now(timezone.utc) + timedelta(days=1)
+            projection_lease.expires_at = NOW + timedelta(days=1)
         async with sf() as session, session.begin():
             control = await session.get(WorkerControl, "kalshi_portfolio_sync")
             worker_snapshot = await session.get(KalshiPortfolioRuntimeSnapshot, principal)
@@ -201,7 +201,7 @@ async def test_projection_exact_membership_fixed_point_empty_and_principal_isola
         control_reader = KalshiPortfolioProjectionReader(
             sf,
             stale_after=timedelta(days=2),
-            now=lambda: datetime.now(timezone.utc),
+            now=lambda: NOW,
         )
         paused = await control_reader.read(principal)
         assert paused["readiness"] == "disabled"
