@@ -30,6 +30,9 @@ from services.kalshi_paper_execution import (
 )
 from services.kalshi_paper_service import (
     KalshiPaperService,
+    PaperDecisionConflict,
+    PaperOpportunityIneligible,
+    PaperOpportunityNotFound,
     PaperPositionNotClosable,
 )
 
@@ -373,7 +376,15 @@ class KalshiPaperTestTradeService:
                 "limit_price": decimal_string(cast(Decimal, run.entry_limit_price), scale=6),
                 "time_in_force": "immediate_or_cancel",
             }
-        decision = await self._paper.record_decision(**facts)
+        try:
+            decision = await self._paper.record_decision(**facts)
+        except (PaperDecisionConflict, PaperOpportunityIneligible, PaperOpportunityNotFound) as exc:
+            await self._block_run(
+                self._session_factory,
+                run_id,
+                f"entry_recovery_permanent_failure:{type(exc).__name__}",
+            )
+            return
         async with self._session_factory() as session, session.begin():
             run = await self._locked_run(session, run_id)
             if run.status != "starting":

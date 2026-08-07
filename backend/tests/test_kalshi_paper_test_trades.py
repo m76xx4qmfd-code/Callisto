@@ -4,6 +4,7 @@ import asyncio
 from dataclasses import replace
 from datetime import datetime, timezone
 from decimal import Decimal
+from unittest.mock import AsyncMock
 
 import pytest
 from sqlalchemy import func, select, text
@@ -14,7 +15,7 @@ from models.database import (
     KalshiPaperTestEvent,
     KalshiPaperTestRun,
 )
-from services.kalshi_paper_service import _canonical_json, _sha256
+from services.kalshi_paper_service import PaperOpportunityNotFound, _canonical_json, _sha256
 from services.kalshi_paper_test_trade_service import (
     KalshiPaperTestRunConflict,
     KalshiPaperTestTradeService,
@@ -73,6 +74,33 @@ async def _test_service(name: str):
         "stop_loss_minimum_price": "0.300000",
     }
     return engine, factory, market_data, paper, service, request
+
+
+@pytest.mark.db
+@pytest.mark.asyncio
+async def test_permanent_entry_recovery_failure_becomes_durable_blocked_evidence() -> None:
+    engine, _factory, _market_data, paper, service, request = await _test_service(
+        "test_trade_entry_recovery_permanent"
+    )
+    paper.record_decision = AsyncMock(side_effect=PaperOpportunityNotFound("opportunity disappeared"))
+    try:
+        result = await service.start_run(**request)
+        run = result["run"]
+        events = result["events"]
+        assert isinstance(run, dict)
+        assert isinstance(events, list)
+        assert run["status"] == "blocked"
+        assert run["last_error"] == "entry_recovery_permanent_failure:PaperOpportunityNotFound"
+        assert [event["event_type"] for event in events if isinstance(event, dict)] == [
+            "started",
+            "blocked",
+        ]
+        blocked = events[-1]
+        assert isinstance(blocked, dict)
+        assert blocked["reason"] == run["last_error"]
+        paper.record_decision.assert_awaited_once()
+    finally:
+        await engine.dispose()
 
 
 @pytest.mark.db
