@@ -641,8 +641,8 @@ export function requireKalshiPaperTestRunInput(value: unknown): KalshiPaperTestR
     }
     return price
   })
-  const [, takeProfit, stopLoss, stopLossMinimum] = prices
-  if (!(stopLossMinimum <= stopLoss && stopLoss < takeProfit)) {
+  const [entry, takeProfit, stopLoss, stopLossMinimum] = prices
+  if (!(stopLossMinimum <= stopLoss && stopLoss < entry && entry < takeProfit)) {
     throw new Error('pending_test_run price threshold ordering is invalid')
   }
   return input as unknown as KalshiPaperTestRunInput

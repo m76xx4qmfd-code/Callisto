@@ -74,6 +74,7 @@ def upgrade() -> None:
         END $$
         """
     )
+    op.execute("SET CONSTRAINTS ALL IMMEDIATE")
     op.alter_column("kalshi_paper_test_runs", "request_json", nullable=False)
     op.execute(
         "ALTER TABLE kalshi_paper_test_runs "
