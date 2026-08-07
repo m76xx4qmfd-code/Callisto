@@ -66,6 +66,7 @@ from api.routes_ai import router as ai_router
 from api.routes_news import router as news_router
 from api.routes_discovery import discovery_router
 from api.routes_kalshi import router as kalshi_router
+from api.routes_kalshi_live_readiness import router as kalshi_live_readiness_router
 from api.routes_kalshi_paper import router as kalshi_paper_router
 from api.routes_kalshi_portfolio import router as kalshi_portfolio_router
 from api.routes_crypto import router as crypto_router
@@ -1154,6 +1155,7 @@ app.include_router(ai_router, prefix="/api", tags=["AI Intelligence"])
 app.include_router(news_router, prefix="/api", tags=["News Intelligence"])
 app.include_router(discovery_router, prefix="/api/discovery", tags=["Trader Discovery"])
 app.include_router(kalshi_router, prefix="/api", tags=["Kalshi"])
+app.include_router(kalshi_live_readiness_router, prefix="/api", tags=["Kalshi Live Readiness"])
 app.include_router(kalshi_paper_router, prefix="/api/kalshi/paper", tags=["Kalshi Paper Execution"])
 app.include_router(kalshi_portfolio_router, prefix="/api", tags=["Kalshi Portfolio Projection"])
 # Unified strategies router at /api/strategies/* (registered after legacy routers)

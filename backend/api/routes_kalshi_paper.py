@@ -19,7 +19,8 @@ from services.kalshi_paper_service import (
     PaperPositionNotClosable,
     PaperPositionNotFound,
 )
-from services.kalshi_paper_execution import KalshiPaperMarketDataClient
+from services.kalshi_paper_execution import KalshiPaperMarketDataClient, KalshiPaperProtocolError
+from services.kalshi_paper_result_service import KalshiPaperResultService
 from services.kalshi_paper_test_trade_service import (
     KalshiPaperTestRunConflict,
     KalshiPaperTestRunNotFound,
@@ -30,6 +31,7 @@ from utils.retry import is_retryable_db_error
 
 router = APIRouter()
 paper_service = KalshiPaperService(session_factory=AsyncSessionLocal, database_engine=async_engine)
+paper_result_service = KalshiPaperResultService(session_factory=AsyncSessionLocal)
 paper_test_trade_service = KalshiPaperTestTradeService(
     session_factory=AsyncSessionLocal,
     database_engine=async_engine,
@@ -168,6 +170,26 @@ async def list_paper_positions(account_id: str, limit: int = Query(default=100, 
         return await paper_service.list_positions(account_id=account_id, limit=limit)
     except PaperAccountNotFound as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except OperationalError as exc:
+        _handle_db_error(exc)
+
+
+@router.get("/positions/{position_id}/final-result")
+async def get_paper_position_final_result(
+    position_id: str,
+    account_id: str = Query(..., min_length=1, max_length=100),
+):
+    try:
+        return await paper_result_service.observe_position_result(
+            account_id=account_id,
+            position_id=position_id,
+        )
+    except PaperPositionNotFound as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except KalshiPaperProtocolError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     except OperationalError as exc:
         _handle_db_error(exc)
 
