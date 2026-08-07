@@ -102,3 +102,45 @@ async def test_exit_bypass_and_noncanonical_quote_evidence_are_rejected() -> Non
             await session.rollback()
     finally:
         await engine.dispose()
+
+
+@pytest.mark.db
+@pytest.mark.asyncio
+async def test_completed_event_cannot_forge_closed_projection_or_financial_snapshot() -> None:
+    engine, factory, _market_data, _paper, service, request = await _test_service(
+        "test_trade_completed_projection_guard"
+    )
+    try:
+        started = await service.start_run(**request)
+        run_id = str(request["run_id"])
+        async with factory() as session:
+            await session.execute(
+                text(
+                    "INSERT INTO kalshi_paper_test_events "
+                    "(run_id,sequence,account_id,event_type,position_id,remaining_quantity,realized_pnl,"
+                    "reason,created_at) VALUES "
+                    "(:run_id,3,:account_id,'completed',:position_id,0,999,'forged',:created_at)"
+                ),
+                {
+                    "run_id": run_id,
+                    "account_id": request["account_id"],
+                    "position_id": started["run"]["position_id"],
+                    "created_at": NOW.replace(tzinfo=None),
+                },
+            )
+            await session.execute(
+                text(
+                    "UPDATE kalshi_paper_test_runs SET status='completed',next_event_sequence=4 "
+                    "WHERE run_id=:run_id"
+                ),
+                {"run_id": run_id},
+            )
+            with pytest.raises(DBAPIError, match="completed event contradicts authoritative position"):
+                await session.commit()
+            await session.rollback()
+
+        authoritative = await service.get_run(run_id)
+        assert authoritative["run"]["status"] == "monitoring"
+        assert authoritative["run"]["remaining_quantity"] == "4.00"
+    finally:
+        await engine.dispose()
