@@ -170,7 +170,10 @@ async def test_head_migration_from_previous_revision_creates_paper_schema() -> N
 
             def _upgrade_head(sync_conn):
                 cfg = _build_alembic_config(sync_conn)
-                command.upgrade(cfg, previous_revision)
+                # This regression originally exercised the position migration while it
+                # was head.  Keep provisioning its real predecessor now that the
+                # test-trade migration follows it, then upgrade through both revisions.
+                command.upgrade(cfg, "202608060001")
                 sync_conn.execute(text(
                     "DROP TRIGGER IF EXISTS trg_kalshi_paper_decisions_validate_positions "
                     "ON kalshi_paper_decisions"
@@ -284,7 +287,9 @@ async def test_head_migration_from_previous_revision_creates_paper_schema() -> N
                             "'kalshi_paper_positions'::regclass, "
                             "'kalshi_paper_orders'::regclass, "
                             "'kalshi_paper_cancellations'::regclass, "
-                            "'kalshi_paper_order_events'::regclass) AND NOT tgisinternal"
+                            "'kalshi_paper_order_events'::regclass, "
+                            "'kalshi_paper_test_runs'::regclass, "
+                            "'kalshi_paper_test_events'::regclass) AND NOT tgisinternal"
                         )
                     )
                 ).scalars()
@@ -298,6 +303,8 @@ async def test_head_migration_from_previous_revision_creates_paper_schema() -> N
                 "kalshi_paper_orders",
                 "kalshi_paper_cancellations",
                 "kalshi_paper_order_events",
+                "kalshi_paper_test_runs",
+                "kalshi_paper_test_events",
             }
             assert paper_tables <= tables
             assert {
@@ -389,6 +396,10 @@ async def test_head_migration_from_previous_revision_creates_paper_schema() -> N
                 "trg_kalshi_paper_orders_validate_lifecycle",
                 "trg_kalshi_paper_cancellations_validate_lifecycle",
                 "trg_kalshi_paper_order_events_validate_lifecycle",
+                "trg_kalshi_paper_test_runs_protect_request",
+                "trg_kalshi_paper_test_events_immutable",
+                "trg_kalshi_paper_test_events_truncate_immutable",
+                "trg_kalshi_paper_test_events_validate",
             } <= trigger_names
     finally:
         await engine.dispose()
