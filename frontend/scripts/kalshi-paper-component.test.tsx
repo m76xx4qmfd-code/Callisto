@@ -577,6 +577,20 @@ describe('KalshiPaperPanel ambiguous replay across reload', () => {
     await screen.findByRole('button', { name: 'Retry same immutable test run' })
     expect(testRunCalls).toHaveLength(0)
     expect(screen.getByRole('combobox', { name: 'Paper account' }).hasAttribute('disabled')).toBe(true)
+
+    localStorage.removeItem('callisto:kalshi-paper:pending-test-run')
+    window.dispatchEvent(new StorageEvent('storage', {
+      key: 'callisto:kalshi-paper:pending-test-run',
+      oldValue: JSON.stringify(pending),
+      newValue: null,
+    }))
+    const user = userEvent.setup()
+    await waitFor(() => expect(screen.getByRole('combobox', { name: 'Paper account' }).hasAttribute('disabled')).toBe(false))
+    await user.click(screen.getByRole('button', { name: 'Validate' }))
+    await screen.findByText('KXTEST-26')
+    await user.click(screen.getByRole('button', { name: 'Start paper test run' }))
+    await waitFor(() => expect(testRunCalls).toHaveLength(1))
+    expect(testRunCalls[0].run_id).not.toBe(pending.run_id)
   })
 
   it('renders authoritative events and invokes pause, resume, and stop only on operator clicks', async () => {

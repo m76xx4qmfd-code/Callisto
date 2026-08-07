@@ -737,14 +737,20 @@ export function requireKalshiPaperTestRunDetail(value: unknown): KalshiPaperTest
   const run = requireKalshiPaperTestRun(detail.run)
   if (!Array.isArray(detail.events)) throw new Error('Invalid Kalshi paper test run events payload')
   const events = detail.events.map(requireKalshiPaperTestEvent)
+  if (events.length === 0 || events[0].sequence !== 1) {
+    throw new Error('Kalshi paper test run evidence must begin at sequence 1')
+  }
   if (events.some((event) => event.run_id !== run.run_id || event.account_id !== run.account_id)) {
     throw new Error('Kalshi paper test event identity mismatch')
   }
-  if (events.some((event, index) => index > 0 && event.sequence <= events[index - 1].sequence)) {
-    throw new Error('Kalshi paper test events are not strictly ordered')
+  if (events.some((event, index) => index > 0 && event.sequence !== events[index - 1].sequence + 1)) {
+    throw new Error('Kalshi paper test events are not contiguous')
   }
   if (events.some((event) => event.sequence >= run.next_event_sequence)) {
     throw new Error('Kalshi paper test event sequence exceeds run projection')
+  }
+  if (events[events.length - 1].sequence !== run.next_event_sequence - 1) {
+    throw new Error('Kalshi paper test events do not reach the run projection')
   }
   return { run, events }
 }

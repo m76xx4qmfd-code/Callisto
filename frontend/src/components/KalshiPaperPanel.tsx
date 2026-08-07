@@ -149,6 +149,7 @@ export default function KalshiPaperPanel() {
       if (event.newValue === null) {
         setPendingTestRun(null)
         setPendingTestRunUnreadable(false)
+        setTestRunId(newTestRunId())
         return
       }
       try {

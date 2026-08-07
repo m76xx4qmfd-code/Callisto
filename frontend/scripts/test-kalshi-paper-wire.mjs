@@ -289,6 +289,15 @@ assert.throws(
   () => requireKalshiPaperTestRunDetail({ ...testRunDetail, events: [{ ...testEvent, account_id: 'other' }] }),
   /identity mismatch/i,
 )
+assert.throws(() => requireKalshiPaperTestRunDetail({ ...testRunDetail, events: [] }), /sequence 1/i)
+assert.throws(
+  () => requireKalshiPaperTestRunDetail({ ...testRunDetail, events: [testEvent, { ...testEvent, sequence: 3 }] }),
+  /contiguous/i,
+)
+assert.throws(
+  () => requireKalshiPaperTestRunDetail({ ...testRunDetail, run: { ...testRun, next_event_sequence: 3 } }),
+  /reach the run projection/i,
+)
 
 const originalPost = api.post
 api.post = async () => ({ data: { ...cancellation, order_id: 'paper-order:different' } })
