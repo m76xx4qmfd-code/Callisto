@@ -218,7 +218,7 @@ class KalshiPaperTestTradeService:
                 await self._finish_exit_attempt(factory, pending)
                 return await self.get_run(normalized_run_id)
 
-            remaining, _realized = await self._position_projection(factory, normalized_run_id)
+            remaining, realized = await self._position_projection(factory, normalized_run_id)
             if remaining == Decimal("0"):
                 async with factory() as session, session.begin():
                     run = await self._locked_run(session, normalized_run_id)
@@ -227,7 +227,9 @@ class KalshiPaperTestTradeService:
                             session,
                             run,
                             event_type="completed",
+                            position_id=run.position_id,
                             remaining_quantity=remaining,
+                            realized_pnl=realized,
                             reason="position_already_closed",
                         )
                         run.status = "completed"
@@ -532,6 +534,7 @@ class KalshiPaperTestTradeService:
                     session,
                     run,
                     event_type="completed",
+                    position_id=run.position_id,
                     remaining_quantity=remaining,
                     realized_pnl=realized,
                     reason="position_fully_closed",
@@ -547,6 +550,7 @@ class KalshiPaperTestTradeService:
                 session,
                 run,
                 event_type="completed",
+                position_id=run.position_id,
                 remaining_quantity=remaining,
                 realized_pnl=realized,
                 reason=reason,

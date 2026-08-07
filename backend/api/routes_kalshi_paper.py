@@ -251,9 +251,15 @@ async def exit_paper_position(position_id: str, request: PaperExitRequest):
 async def start_paper_test_run(request: PaperTestRunRequest):
     try:
         return await paper_test_trade_service.start_run(**request.model_dump())
-    except KalshiPaperTestRunNotFound as exc:
+    except (KalshiPaperTestRunNotFound, PaperAccountNotFound, PaperOpportunityNotFound) as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
-    except (KalshiPaperTestRunConflict, KalshiPaperTestRunTransition, IntegrityError) as exc:
+    except (
+        KalshiPaperTestRunConflict,
+        KalshiPaperTestRunTransition,
+        PaperDecisionConflict,
+        PaperOpportunityIneligible,
+        IntegrityError,
+    ) as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc

@@ -4989,6 +4989,22 @@ def _register_paper_test_trade_validation(run_table, event_table) -> None:  # no
                         RAISE EXCEPTION 'Kalshi paper test exit event contradicts authoritative position projection';
                     END IF;
                 END IF;
+                IF NEW.event_type = 'completed' THEN
+                    SELECT p.entry_quantity-COALESCE(sum(d.filled_quantity) FILTER (WHERE d.order_side='sell'),0),
+                           COALESCE(sum(d.realized_pnl) FILTER (WHERE d.order_side='sell'),0)
+                      INTO authoritative_remaining, authoritative_pnl
+                      FROM kalshi_paper_positions p
+                      LEFT JOIN kalshi_paper_decisions d
+                        ON d.account_id=p.account_id AND d.position_id=p.position_id
+                     WHERE p.account_id=controlled.account_id AND p.position_id=controlled.position_id
+                     GROUP BY p.entry_quantity;
+                    IF NEW.position_id IS DISTINCT FROM controlled.position_id
+                       OR authoritative_remaining IS DISTINCT FROM 0
+                       OR NEW.remaining_quantity IS DISTINCT FROM authoritative_remaining
+                       OR NEW.realized_pnl IS DISTINCT FROM authoritative_pnl THEN
+                        RAISE EXCEPTION 'Kalshi paper test completed event contradicts authoritative position';
+                    END IF;
+                END IF;
                 IF NEW.event_type = 'entry_filled' AND NOT EXISTS (
                     SELECT 1 FROM kalshi_paper_positions p
                      WHERE p.account_id = controlled.account_id AND p.position_id = NEW.position_id
