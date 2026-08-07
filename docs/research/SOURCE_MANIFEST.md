@@ -23,6 +23,18 @@
   - Declared version: `3.27.0`
   - SHA-256: `41d93050bf3f692cf3a898ba3a1a033f3e857fee56370ddcb18af6a4225f41cb`
   - Paper scope: unauthenticated production market and fixed-point orderbook GET schemas only; no venue-write endpoint is exposed.
+- Resolution OpenAPI source of truth:
+  - Source URL: `https://docs.kalshi.com/openapi.yaml`
+  - First retrieval: `2026-08-07T17:35:22Z`
+  - Second retrieval: `2026-08-07T18:15:43.660581Z`
+  - Final resolved URL: `https://docs.kalshi.com/openapi.yaml`
+  - Vendored bytes: `kalshi_openapi_3_27_0_20260807.yaml`
+  - OpenAPI dialect: `3.0.0`
+  - Declared version: `3.27.0`
+  - SHA-256: `bd80e9d42fec2f9cddd5e498ef53cf34bc79effec8fe39031b327c9d483741e2`
+  - Root `security`: absent
+  - `GET /markets/{ticker}` `security`: absent
+  - Resolution scope: strict selected settlement projection from the unauthenticated public operation only. This provenance is separate from, and does not replace, historical paper evidence bound to `41d930…`.
 - AsyncAPI source of truth: https://docs.kalshi.com/asyncapi.yaml
 
 ## Competitive landscape starting source

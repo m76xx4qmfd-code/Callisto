@@ -17,6 +17,8 @@ KALSHI_PAPER_MARKET_DATA_ORIGIN = "https://external-api.kalshi.com"
 KALSHI_API_PREFIX = "/trade-api/v2"
 KALSHI_OPENAPI_SHA256 = "41d93050bf3f692cf3a898ba3a1a033f3e857fee56370ddcb18af6a4225f41cb"
 KALSHI_OPENAPI_VERSION = "3.27.0"
+KALSHI_RESOLUTION_OPENAPI_SHA256 = "bd80e9d42fec2f9cddd5e498ef53cf34bc79effec8fe39031b327c9d483741e2"
+KALSHI_RESOLUTION_OPENAPI_VERSION = "3.27.0"
 MAX_SOURCE_AGE_SECONDS = Decimal("5")
 _PRICE_SCALE = 6
 _QUANTITY_SCALE = 2
@@ -26,6 +28,12 @@ _DECIMAL_PATTERN = re.compile(r"^(?:0|[1-9]\d*)(?:\.\d+)?$")
 
 Outcome = Literal["yes", "no"]
 PaperFillStatus = Literal["filled", "partial", "no_fill"]
+PaperMarketResultState = Literal["waiting", "final"]
+
+_MARKET_LIFECYCLE_STATUSES = frozenset(
+    {"initialized", "inactive", "active", "closed", "determined", "disputed", "amended", "finalized"}
+)
+_MARKET_RESULTS = frozenset({"yes", "no", "scalar", ""})
 
 
 class KalshiPaperProtocolError(ValueError):
@@ -142,7 +150,10 @@ def _parse_rfc3339(value: object, *, field: str) -> datetime:
 
 
 def _parse_source_date(response: httpx.Response, *, now: datetime) -> datetime:
-    raw = response.headers.get("date")
+    date_values = response.headers.get_list("date")
+    if len(date_values) > 1:
+        raise KalshiPaperProtocolError("Kalshi response has multiple source Date headers")
+    raw = date_values[0] if date_values else None
     if not raw:
         raise KalshiPaperProtocolError("Kalshi response is missing source Date")
     try:
@@ -160,9 +171,22 @@ def _parse_source_date(response: httpx.Response, *, now: datetime) -> datetime:
     return observed_at
 
 
+def _reject_duplicate_json_keys(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    parsed: dict[str, object] = {}
+    for key, value in pairs:
+        if key in parsed:
+            raise KalshiPaperProtocolError(f"duplicate JSON key: {key}")
+        parsed[key] = value
+    return parsed
+
+
 def _load_json(response: httpx.Response, *, context: str) -> Mapping[str, object]:
     try:
-        payload = json.loads(response.content.decode("utf-8"), parse_float=Decimal)
+        payload = json.loads(
+            response.content.decode("utf-8"),
+            parse_float=Decimal,
+            object_pairs_hook=_reject_duplicate_json_keys,
+        )
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise KalshiPaperProtocolError(f"invalid Kalshi {context} JSON") from exc
     if not isinstance(payload, Mapping):
@@ -213,6 +237,30 @@ class PaperMarket:
 
 
 @dataclass(frozen=True)
+class PaperMarketResultObservation:
+    ticker: str
+    event_ticker: str
+    status: str
+    result: str
+    state: PaperMarketResultState
+    final: bool
+    notional_value: Decimal
+    expiration_value: str
+    settlement_ts_present: bool
+    settlement_ts: datetime | None
+    settlement_value_present: bool
+    settlement_value: Decimal | None
+    source_origin: str
+    source_path: str
+    resolution_openapi_version: str
+    resolution_openapi_sha256: str
+    observed_at: datetime
+    fetched_at: datetime
+    evidence_hash: str
+    evidence_json: str
+
+
+@dataclass(frozen=True)
 class PaperQuote:
     market: PaperMarket
     book: PaperBook
@@ -240,6 +288,107 @@ class PaperFillResult:
     fee: Decimal
     fills: tuple[PaperFill, ...]
     formula_version: str = "kalshi-complementary-depth-ioc-v1"
+
+
+def parse_market_result_response(
+    response: httpx.Response,
+    *,
+    requested_ticker: str,
+    source_origin: str,
+    source_path: str,
+    fetched_at: datetime,
+) -> PaperMarketResultObservation:
+    """Parse one exact public market response without adding any venue capability."""
+    if response.status_code != 200:
+        raise KalshiPaperProtocolError(f"Kalshi public market result request returned HTTP {response.status_code}")
+    normalized_ticker = str(requested_ticker or "").strip().upper()
+    if not _TICKER_PATTERN.fullmatch(normalized_ticker):
+        raise KalshiPaperProtocolError("ticker is invalid")
+    normalized_fetched_at = fetched_at.astimezone(timezone.utc)
+    observed_at = _parse_source_date(response, now=normalized_fetched_at)
+    market = _required_mapping(
+        _load_json(response, context="market result"),
+        "market",
+        context="market result",
+    )
+    ticker = _required_text(market, "ticker", context="market result").upper()
+    if ticker != normalized_ticker:
+        raise KalshiPaperProtocolError("Kalshi market result ticker identity mismatch")
+    event_ticker = _required_text(market, "event_ticker", context="market result").upper()
+    if _required_text(market, "market_type", context="market result") != "binary":
+        raise KalshiPaperProtocolError("public result observation supports binary Kalshi markets only")
+
+    status_value = market.get("status")
+    if not isinstance(status_value, str) or status_value not in _MARKET_LIFECYCLE_STATUSES:
+        raise KalshiPaperProtocolError("invalid Kalshi market result status")
+    result_value = market.get("result")
+    if not isinstance(result_value, str) or result_value not in _MARKET_RESULTS:
+        raise KalshiPaperProtocolError("invalid Kalshi market result result")
+    final = status_value == "finalized"
+    if final and result_value not in {"yes", "no"}:
+        raise KalshiPaperProtocolError("Kalshi finalized binary result must be yes or no")
+
+    notional_value = parse_money(market.get("notional_value_dollars"), field="notional_value_dollars")
+    if notional_value != Decimal("1"):
+        raise KalshiPaperProtocolError("public result observation supports one-dollar notional markets only")
+    if "expiration_value" not in market or not isinstance(market["expiration_value"], str):
+        raise KalshiPaperProtocolError("invalid Kalshi market result expiration_value")
+    expiration_value = cast(str, market["expiration_value"])
+
+    settlement_ts_present = "settlement_ts" in market
+    raw_settlement_ts = market.get("settlement_ts")
+    settlement_ts = None
+    if raw_settlement_ts is not None:
+        settlement_ts = _parse_rfc3339(raw_settlement_ts, field="settlement_ts")
+    settlement_value_present = "settlement_value_dollars" in market
+    raw_settlement_value = market.get("settlement_value_dollars")
+    settlement_value = None
+    if raw_settlement_value is not None:
+        settlement_value = parse_money(raw_settlement_value, field="settlement_value_dollars")
+
+    evidence: dict[str, object] = {
+        "event_ticker": event_ticker,
+        "expiration_value": expiration_value,
+        "market_type": "binary",
+        "notional_value_dollars": decimal_string(notional_value, scale=_PRICE_SCALE),
+        "observed_at": observed_at.isoformat(),
+        "resolution_openapi_sha256": KALSHI_RESOLUTION_OPENAPI_SHA256,
+        "resolution_openapi_version": KALSHI_RESOLUTION_OPENAPI_VERSION,
+        "result": result_value,
+        "source_origin": source_origin,
+        "source_path": source_path,
+        "status": status_value,
+        "ticker": ticker,
+    }
+    if settlement_ts_present:
+        evidence["settlement_ts"] = settlement_ts.isoformat() if settlement_ts is not None else None
+    if settlement_value_present:
+        evidence["settlement_value_dollars"] = (
+            decimal_string(settlement_value, scale=_PRICE_SCALE) if settlement_value is not None else None
+        )
+    evidence_json = _canonical_json(evidence)
+    return PaperMarketResultObservation(
+        ticker=ticker,
+        event_ticker=event_ticker,
+        status=status_value,
+        result=result_value,
+        state="final" if final else "waiting",
+        final=final,
+        notional_value=notional_value,
+        expiration_value=expiration_value,
+        settlement_ts_present=settlement_ts_present,
+        settlement_ts=settlement_ts,
+        settlement_value_present=settlement_value_present,
+        settlement_value=settlement_value,
+        source_origin=source_origin,
+        source_path=source_path,
+        resolution_openapi_version=KALSHI_RESOLUTION_OPENAPI_VERSION,
+        resolution_openapi_sha256=KALSHI_RESOLUTION_OPENAPI_SHA256,
+        observed_at=observed_at,
+        fetched_at=normalized_fetched_at,
+        evidence_hash=_hash_json(evidence_json),
+        evidence_json=evidence_json,
+    )
 
 
 def _parse_price_ranges(value: object) -> tuple[PaperPriceRange, ...]:
@@ -459,6 +608,44 @@ def simulate_sell_ioc(
         fills=tuple(fills),
         formula_version="kalshi-owned-depth-sell-ioc-v1",
     )
+
+
+class KalshiPublicResultClient:
+    """Production-fixed, unauthenticated, GET-only public-result client."""
+
+    def __init__(
+        self,
+        *,
+        transport: httpx.AsyncBaseTransport | None = None,
+        now: Callable[[], datetime] | None = None,
+    ) -> None:
+        self._transport = transport
+        self._now = now or (lambda: datetime.now(timezone.utc))
+
+    async def fetch_market_result(self, ticker: str) -> PaperMarketResultObservation:
+        normalized_ticker = str(ticker or "").strip().upper()
+        if not _TICKER_PATTERN.fullmatch(normalized_ticker):
+            raise KalshiPaperProtocolError("ticker is invalid")
+        source_path = f"{KALSHI_API_PREFIX}/markets/{quote(normalized_ticker, safe='')}"
+        async with httpx.AsyncClient(
+            transport=self._transport,
+            headers={"Accept": "application/json"},
+            timeout=5.0,
+            trust_env=False,
+            follow_redirects=False,
+        ) as client:
+            try:
+                response = await client.get(f"{KALSHI_PAPER_MARKET_DATA_ORIGIN}{source_path}")
+            except httpx.HTTPError as exc:
+                raise KalshiPaperProtocolError("Kalshi public market result request failed") from exc
+            fetched_at = self._now().astimezone(timezone.utc)
+        return parse_market_result_response(
+            response,
+            requested_ticker=normalized_ticker,
+            source_origin=KALSHI_PAPER_MARKET_DATA_ORIGIN,
+            source_path=source_path,
+            fetched_at=fetched_at,
+        )
 
 
 class KalshiPaperMarketDataClient:
