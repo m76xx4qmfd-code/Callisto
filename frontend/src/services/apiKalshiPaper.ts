@@ -48,7 +48,8 @@ export interface KalshiPaperDecision {
   ticker: string
   event_ticker: string | null
   outcome: 'yes' | 'no'
-  order_side: 'buy' | null
+  order_side: 'buy' | 'sell' | null
+  position_id: string | null
   time_in_force: 'immediate_or_cancel' | 'good_till_canceled' | null
   requested_quantity: string | null
   limit_price: string | null
@@ -59,6 +60,8 @@ export interface KalshiPaperDecision {
   average_fill_price: string | null
   notional: string
   fee: string
+  position_cost_basis: string | null
+  realized_pnl: string | null
   cash_before: string
   cash_after: string
   order_id: string | null
@@ -116,7 +119,37 @@ export interface KalshiPaperCancellation extends KalshiPaperCancellationInput {
   created_at: string
 }
 
+export interface KalshiPaperPosition {
+  account_id: string
+  position_id: string
+  entry_decision_id: string
+  ticker: string
+  outcome: 'yes' | 'no'
+  entry_quantity: string
+  entry_notional: string
+  entry_fee: string
+  sold_quantity: string
+  remaining_quantity: string
+  exit_notional: string
+  exit_fee: string
+  allocated_entry_cost: string
+  realized_pnl: string
+  status: 'open' | 'closed'
+  closable: boolean
+  exit_decision_ids: string[]
+  created_at: string
+}
+
+export interface KalshiPaperPositionExitInput {
+  account_id: string
+  position_id: string
+  decision_id: string
+  quantity: string
+  minimum_price: string
+}
+
 const DECIMAL_PATTERN = /^(?:0|[1-9]\d*)(?:\.\d+)?$/
+const SIGNED_DECIMAL_PATTERN = /^-?(?:0|[1-9]\d*)(?:\.\d+)?$/
 const SHA256_PATTERN = /^[0-9a-f]{64}$/
 
 function requireObject(value: unknown, path: string): Record<string, unknown> {
@@ -154,6 +187,26 @@ function requireNullableDecimalText(record: Record<string, unknown>, key: string
   const value = requireNullableTextValue(record, key, path)
   if (value !== null && !DECIMAL_PATTERN.test(value)) {
     throw new Error(`Kalshi paper exact decimal is invalid at ${path}.${key}`)
+  }
+  return value
+}
+
+function requireSignedDecimalText(record: Record<string, unknown>, key: string, path: string): string {
+  const value = requireTextValue(record, key, path)
+  if (!SIGNED_DECIMAL_PATTERN.test(value)) {
+    throw new Error(`Kalshi paper signed exact decimal is invalid at ${path}.${key}`)
+  }
+  return value
+}
+
+function requireNullableSignedDecimalText(
+  record: Record<string, unknown>,
+  key: string,
+  path: string,
+): string | null {
+  const value = requireNullableTextValue(record, key, path)
+  if (value !== null && !SIGNED_DECIMAL_PATTERN.test(value)) {
+    throw new Error(`Kalshi paper signed exact decimal is invalid at ${path}.${key}`)
   }
   return value
 }
@@ -277,9 +330,10 @@ export function requireKalshiPaperDecision(value: unknown): KalshiPaperDecision 
   rejectUnknownFields(decision, [
     'account_id', 'decision_id', 'account_sequence', 'action', 'opportunity_id',
     'opportunity_stable_id', 'opportunity_revision', 'strategy_key', 'strategy_version', 'ticker',
-    'event_ticker', 'outcome', 'order_side', 'time_in_force', 'requested_quantity', 'limit_price',
+    'event_ticker', 'outcome', 'order_side', 'position_id', 'time_in_force', 'requested_quantity', 'limit_price',
     'status', 'reason', 'filled_quantity', 'remaining_quantity', 'average_fill_price', 'notional',
-    'fee', 'cash_before', 'cash_after', 'order_id', 'reserved_cash', 'fill_formula_version',
+    'fee', 'position_cost_basis', 'realized_pnl', 'cash_before', 'cash_after', 'order_id', 'reserved_cash',
+    'fill_formula_version',
     'fee_rule_version', 'fee_provenance', 'market_evidence_hash', 'book_evidence_hash',
     'opportunity_snapshot', 'fills', 'created_at',
   ], 'decision')
@@ -295,7 +349,8 @@ export function requireKalshiPaperDecision(value: unknown): KalshiPaperDecision 
   requireTextValue(decision, 'ticker', 'decision')
   requireNullableTextValue(decision, 'event_ticker', 'decision')
   requireEnum(decision, 'outcome', ['yes', 'no'] as const, 'decision')
-  requireNullableEnum(decision, 'order_side', ['buy'] as const, 'decision')
+  requireNullableEnum(decision, 'order_side', ['buy', 'sell'] as const, 'decision')
+  requireNullableTextValue(decision, 'position_id', 'decision')
   requireNullableEnum(decision, 'time_in_force', ['immediate_or_cancel', 'good_till_canceled'] as const, 'decision')
   requireNullableDecimalText(decision, 'requested_quantity', 'decision')
   requireNullableDecimalText(decision, 'limit_price', 'decision')
@@ -306,6 +361,8 @@ export function requireKalshiPaperDecision(value: unknown): KalshiPaperDecision 
   requireNullableDecimalText(decision, 'average_fill_price', 'decision')
   requireDecimalText(decision, 'notional', 'decision')
   requireDecimalText(decision, 'fee', 'decision')
+  requireNullableDecimalText(decision, 'position_cost_basis', 'decision')
+  requireNullableSignedDecimalText(decision, 'realized_pnl', 'decision')
   requireDecimalText(decision, 'cash_before', 'decision')
   requireDecimalText(decision, 'cash_after', 'decision')
   requireNullableTextValue(decision, 'order_id', 'decision')
@@ -319,6 +376,19 @@ export function requireKalshiPaperDecision(value: unknown): KalshiPaperDecision 
   if (!Array.isArray(decision.fills)) throw new Error('Invalid Kalshi paper payload at decision.fills')
   decision.fills.forEach((fill, index) => requireKalshiPaperFill(fill, `decision.fills[${index}]`))
   requireTextValue(decision, 'created_at', 'decision')
+  if (decision.order_side === 'sell') {
+    if (
+      decision.action !== 'execute'
+      || decision.time_in_force !== 'immediate_or_cancel'
+      || decision.position_id === null
+      || decision.position_cost_basis === null
+      || decision.realized_pnl === null
+    ) {
+      throw new Error('Contradictory Kalshi paper SELL decision')
+    }
+  } else if (decision.position_cost_basis !== null || decision.realized_pnl !== null) {
+    throw new Error('Non-SELL decision cannot carry realized position accounting')
+  }
   return decision as unknown as KalshiPaperDecision
 }
 
@@ -406,6 +476,61 @@ export function requireKalshiPaperCancellation(value: unknown): KalshiPaperCance
   return cancellation as unknown as KalshiPaperCancellation
 }
 
+export function requireKalshiPaperPosition(value: unknown): KalshiPaperPosition {
+  const position = requireObject(value, 'position')
+  rejectUnknownFields(position, [
+    'account_id', 'position_id', 'entry_decision_id', 'ticker', 'outcome', 'entry_quantity',
+    'entry_notional', 'entry_fee', 'sold_quantity', 'remaining_quantity', 'exit_notional',
+    'exit_fee', 'allocated_entry_cost', 'realized_pnl', 'status', 'closable',
+    'exit_decision_ids', 'created_at',
+  ], 'position')
+  requireTextValue(position, 'account_id', 'position')
+  requireTextValue(position, 'position_id', 'position')
+  requireTextValue(position, 'entry_decision_id', 'position')
+  requireTextValue(position, 'ticker', 'position')
+  requireEnum(position, 'outcome', ['yes', 'no'] as const, 'position')
+  requireDecimalText(position, 'entry_quantity', 'position')
+  requireDecimalText(position, 'entry_notional', 'position')
+  requireDecimalText(position, 'entry_fee', 'position')
+  requireDecimalText(position, 'sold_quantity', 'position')
+  const remaining = requireDecimalText(position, 'remaining_quantity', 'position')
+  requireDecimalText(position, 'exit_notional', 'position')
+  requireDecimalText(position, 'exit_fee', 'position')
+  requireDecimalText(position, 'allocated_entry_cost', 'position')
+  requireSignedDecimalText(position, 'realized_pnl', 'position')
+  const status = requireEnum(position, 'status', ['open', 'closed'] as const, 'position')
+  requireBoolean(position, 'closable', 'position')
+  const exitDecisionIds = position.exit_decision_ids
+  if (!Array.isArray(exitDecisionIds) || exitDecisionIds.some((value) => typeof value !== 'string' || value.length === 0)) {
+    throw new Error('Invalid position.exit_decision_ids')
+  }
+  requireTextValue(position, 'created_at', 'position')
+  const remainingIsZero = /^0(?:\.0+)?$/.test(remaining)
+  if ((status === 'closed') !== remainingIsZero || position.closable !== !remainingIsZero) {
+    throw new Error('Contradictory Kalshi paper position status')
+  }
+  return position as unknown as KalshiPaperPosition
+}
+
+export function requireKalshiPaperPositionExitInput(value: unknown): KalshiPaperPositionExitInput {
+  const input = requireObject(value, 'pending_position_exit')
+  rejectUnknownFields(input, [
+    'account_id', 'position_id', 'decision_id', 'quantity', 'minimum_price',
+  ], 'pending_position_exit')
+  requireTextValue(input, 'account_id', 'pending_position_exit')
+  requireTextValue(input, 'position_id', 'pending_position_exit')
+  requireTextValue(input, 'decision_id', 'pending_position_exit')
+  const quantity = requireDecimalText(input, 'quantity', 'pending_position_exit')
+  const minimumPrice = requireDecimalText(input, 'minimum_price', 'pending_position_exit')
+  if (!/^(?:0|[1-9]\d*)\.\d{2}$/.test(quantity)) {
+    throw new Error('pending_position_exit.quantity must use exact quantity scale')
+  }
+  if (!/^(?:0|[1-9]\d*)\.\d{6}$/.test(minimumPrice)) {
+    throw new Error('pending_position_exit.minimum_price must use exact price scale')
+  }
+  return input as unknown as KalshiPaperPositionExitInput
+}
+
 export async function createKalshiPaperAccount(input: {
   name: string
   starting_cash: string
@@ -479,4 +604,44 @@ export async function cancelKalshiPaperOrder(input: KalshiPaperCancellationInput
     throw new Error('Kalshi paper cancellation response identity mismatch')
   }
   return cancellation
+}
+
+export async function getKalshiPaperPositions(accountId: string, limit = 100): Promise<KalshiPaperPosition[]> {
+  const { data } = await api.get(`/kalshi/paper/accounts/${encodeURIComponent(accountId)}/positions`, {
+    params: { limit },
+  })
+  const payload = unwrapApiData(data)
+  if (!Array.isArray(payload)) throw new Error('Invalid Kalshi paper positions payload')
+  const positions = payload.map(requireKalshiPaperPosition)
+  if (positions.some((position) => position.account_id !== accountId)) {
+    throw new Error('Kalshi paper position account identity mismatch')
+  }
+  return positions
+}
+
+export async function exitKalshiPaperPosition(input: KalshiPaperPositionExitInput): Promise<KalshiPaperDecision> {
+  const payload = requireKalshiPaperPositionExitInput(input)
+  const { data } = await api.post(
+    `/kalshi/paper/positions/${encodeURIComponent(payload.position_id)}/exits`,
+    {
+      account_id: payload.account_id,
+      decision_id: payload.decision_id,
+      quantity: payload.quantity,
+      minimum_price: payload.minimum_price,
+    },
+  )
+  const decision = requireKalshiPaperDecision(unwrapApiData(data))
+  if (
+    decision.account_id !== payload.account_id
+    || decision.position_id !== payload.position_id
+    || decision.decision_id !== payload.decision_id
+    || decision.action !== 'execute'
+    || decision.order_side !== 'sell'
+    || decision.time_in_force !== 'immediate_or_cancel'
+    || decision.requested_quantity !== payload.quantity
+    || decision.limit_price !== payload.minimum_price
+  ) {
+    throw new Error('Kalshi paper position exit response identity mismatch')
+  }
+  return decision
 }

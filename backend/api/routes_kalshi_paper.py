@@ -15,6 +15,8 @@ from services.kalshi_paper_service import (
     PaperOpportunityIneligible,
     PaperOpportunityNotFound,
     PaperOrderNotCancelable,
+    PaperPositionNotClosable,
+    PaperPositionNotFound,
 )
 from utils.retry import is_retryable_db_error
 
@@ -60,6 +62,15 @@ class PaperCancellationRequest(BaseModel):
     cancellation_id: StrictStr = Field(..., min_length=1, max_length=200)
 
 
+class PaperExitRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    account_id: StrictStr = Field(..., min_length=1, max_length=100)
+    decision_id: StrictStr = Field(..., min_length=1, max_length=200)
+    quantity: StrictStr = Field(..., pattern=r"^(?:0|[1-9][0-9]*)\.[0-9]{2}$", max_length=80)
+    minimum_price: StrictStr = Field(..., pattern=r"^(?:0|[1-9][0-9]*)\.[0-9]{6}$", max_length=80)
+
+
 def _handle_db_error(exc: OperationalError) -> None:
     if is_retryable_db_error(exc):
         raise HTTPException(status_code=503, detail="Database is busy; please retry.") from exc
@@ -100,6 +111,16 @@ async def list_paper_decisions(account_id: str, limit: int = Query(default=50, g
 async def list_paper_orders(account_id: str, limit: int = Query(default=100, ge=1, le=500)):
     try:
         return await paper_service.list_orders(account_id=account_id, limit=limit)
+    except PaperAccountNotFound as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except OperationalError as exc:
+        _handle_db_error(exc)
+
+
+@router.get("/accounts/{account_id}/positions")
+async def list_paper_positions(account_id: str, limit: int = Query(default=100, ge=1, le=500)):
+    try:
+        return await paper_service.list_positions(account_id=account_id, limit=limit)
     except PaperAccountNotFound as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except OperationalError as exc:
@@ -154,6 +175,26 @@ async def cancel_paper_order(request: PaperCancellationRequest):
     except PaperAccountNotFound as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except (PaperCancellationConflict, PaperOrderNotCancelable) as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except OperationalError as exc:
+        _handle_db_error(exc)
+
+
+@router.post("/positions/{position_id}/exits")
+async def exit_paper_position(position_id: str, request: PaperExitRequest):
+    try:
+        return await paper_service.record_exit(
+            account_id=request.account_id,
+            decision_id=request.decision_id,
+            position_id=position_id,
+            quantity=request.quantity,
+            minimum_price=request.minimum_price,
+        )
+    except (PaperAccountNotFound, PaperPositionNotFound) as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except (PaperDecisionConflict, PaperPositionNotClosable) as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc

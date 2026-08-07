@@ -21,6 +21,7 @@ Both skip when no writable Postgres is reachable.
 from __future__ import annotations
 
 import sys
+from decimal import Decimal
 from pathlib import Path
 
 import pytest
@@ -170,6 +171,23 @@ async def test_head_migration_from_previous_revision_creates_paper_schema() -> N
             def _upgrade_head(sync_conn):
                 cfg = _build_alembic_config(sync_conn)
                 command.upgrade(cfg, previous_revision)
+                sync_conn.execute(text(
+                    "DROP TRIGGER IF EXISTS trg_kalshi_paper_decisions_validate_positions "
+                    "ON kalshi_paper_decisions"
+                ))
+                sync_conn.execute(text("DROP TABLE IF EXISTS kalshi_paper_positions CASCADE"))
+                sync_conn.execute(text(
+                    "DROP TRIGGER IF EXISTS trg_kalshi_paper_fills_validate_sell_evidence "
+                    "ON kalshi_paper_fills"
+                ))
+                sync_conn.execute(text(
+                    "ALTER TABLE kalshi_paper_intents DROP COLUMN IF EXISTS order_side, "
+                    "DROP COLUMN IF EXISTS position_id"
+                ))
+                sync_conn.execute(text(
+                    "ALTER TABLE kalshi_paper_decisions DROP COLUMN IF EXISTS position_id, "
+                    "DROP COLUMN IF EXISTS position_cost_basis, DROP COLUMN IF EXISTS realized_pnl"
+                ))
                 sync_conn.execute(
                     text(
                         "INSERT INTO kalshi_paper_accounts "
@@ -188,6 +206,42 @@ async def test_head_migration_from_previous_revision_creates_paper_schema() -> N
                     ),
                     {"hash": "a" * 64},
                 )
+                sync_conn.execute(
+                    text(
+                        "INSERT INTO kalshi_paper_decisions "
+                        "(account_id, decision_id, account_sequence, request_hash, action, opportunity_id, "
+                        "opportunity_stable_id, opportunity_revision, opportunity_snapshot_json, strategy_key, "
+                        "strategy_version, ticker, event_ticker, outcome, order_side, time_in_force, "
+                        "requested_quantity, limit_price, status, reason, source_origin, market_observed_at, "
+                        "market_fetched_at, market_evidence_hash, market_evidence_json, book_observed_at, "
+                        "book_fetched_at, book_evidence_hash, book_evidence_json, fill_formula_version, "
+                        "fee_rule_version, fee_provenance_json, filled_quantity, remaining_quantity, "
+                        "average_fill_price, notional, fee, cash_before, cash_after, created_at) VALUES "
+                        "('prior-account', 'prior-intent', 1, :hash, 'execute', 'opp', 'stable', :hash, '{}', "
+                        "'basic', NULL, 'KXPRIOR', NULL, 'yes', 'buy', 'immediate_or_cancel', 1, 0.5, "
+                        "'filled', 'prior_fill', NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, "
+                        "'kalshi-complementary-depth-ioc-v1', 'kalshi-market-fee-waiver-v1', :provenance, "
+                        "1, 0, 0.5, 0.5, 0, 10, 9.5, now())"
+                    ),
+                    {
+                        "hash": "a" * 64,
+                        "provenance": (
+                            '{"kind":"market_fee_waiver","market_snapshot_hash":"' + "b" * 64
+                            + '","observed_at":"2026-08-06T12:00:00+00:00","openapi_sha256":"'
+                            + "c" * 64 + '","waiver_expiration_time":"2026-08-07T12:00:00+00:00"}'
+                        ),
+                    },
+                )
+                sync_conn.execute(text(
+                    "INSERT INTO kalshi_paper_fills "
+                    "(account_id, decision_id, sequence, quantity, price, notional, fee, source_bid_price, "
+                    "source_side, evidence_json, created_at) VALUES "
+                    "('prior-account', 'prior-intent', 1, 1, 0.5, 0.5, 0, 0.5, 'no', '{}', now())"
+                ))
+                sync_conn.execute(text(
+                    "UPDATE kalshi_paper_accounts SET cash_balance=9.5, journal_sequence=1 "
+                    "WHERE id='prior-account'"
+                ))
                 sync_conn.commit()
                 command.upgrade(cfg, head_revision)
                 inspector = inspect(sync_conn)
@@ -199,6 +253,7 @@ async def test_head_migration_from_previous_revision_creates_paper_schema() -> N
                 orders = {column["name"] for column in inspector.get_columns("kalshi_paper_orders")}
                 cancellations = {column["name"] for column in inspector.get_columns("kalshi_paper_cancellations")}
                 events = {column["name"] for column in inspector.get_columns("kalshi_paper_order_events")}
+                positions = {column["name"] for column in inspector.get_columns("kalshi_paper_positions")}
                 decision_foreign_keys = {
                     foreign_key["name"] for foreign_key in inspector.get_foreign_keys("kalshi_paper_decisions")
                 }
@@ -208,13 +263,13 @@ async def test_head_migration_from_previous_revision_creates_paper_schema() -> N
                 order_indexes = {index["name"] for index in inspector.get_indexes("kalshi_paper_orders")}
                 event_indexes = {index["name"] for index in inspector.get_indexes("kalshi_paper_order_events")}
                 return (
-                    tables, intents, decisions, fills, accounts, orders, cancellations, events,
+                    tables, intents, decisions, fills, accounts, orders, cancellations, events, positions,
                     decision_foreign_keys, event_foreign_keys, order_indexes, event_indexes,
                 )
 
             (
                 tables, intent_columns, decision_columns, fill_columns, account_columns,
-                order_columns, cancellation_columns, event_columns, decision_foreign_keys,
+                order_columns, cancellation_columns, event_columns, position_columns, decision_foreign_keys,
                 event_foreign_keys, order_indexes, event_indexes,
             ) = await conn.run_sync(_upgrade_head)
             trigger_names = set(
@@ -226,6 +281,7 @@ async def test_head_migration_from_previous_revision_creates_paper_schema() -> N
                             "'kalshi_paper_intents'::regclass, "
                             "'kalshi_paper_decisions'::regclass, "
                             "'kalshi_paper_fills'::regclass, "
+                            "'kalshi_paper_positions'::regclass, "
                             "'kalshi_paper_orders'::regclass, "
                             "'kalshi_paper_cancellations'::regclass, "
                             "'kalshi_paper_order_events'::regclass) AND NOT tgisinternal"
@@ -253,7 +309,7 @@ async def test_head_migration_from_previous_revision_creates_paper_schema() -> N
                 "time_in_force",
                 "requested_quantity",
                 "limit_price",
-                "created_at",
+                "order_side", "position_id", "created_at",
             } <= intent_columns
             assert {
                 "account_id",
@@ -269,6 +325,7 @@ async def test_head_migration_from_previous_revision_creates_paper_schema() -> N
                 "fee",
                 "cash_before",
                 "cash_after",
+                "position_id", "position_cost_basis", "realized_pnl",
             } <= decision_columns
             assert {
                 "account_id",
@@ -283,6 +340,19 @@ async def test_head_migration_from_previous_revision_creates_paper_schema() -> N
             } <= fill_columns
             assert "fk_kalshi_paper_decisions_intent" in decision_foreign_keys
             assert "reserved_cash" in account_columns
+            assert {
+                "account_id", "position_id", "entry_decision_id", "ticker", "outcome",
+                "entry_quantity", "entry_notional", "entry_fee", "created_at",
+            } <= position_columns
+            backfilled_position = (
+                await conn.execute(text(
+                    "SELECT entry_decision_id, ticker, outcome, entry_quantity, entry_notional, entry_fee "
+                    "FROM kalshi_paper_positions WHERE account_id='prior-account'"
+                ))
+            ).one()
+            assert tuple(backfilled_position) == (
+                "prior-intent", "KXPRIOR", "yes", 1, Decimal("0.5"), 0,
+            )
 
             assert {"order_id", "decision_id", "open_quantity", "decision_status", "reserved_cash"} <= order_columns
             assert {"cancellation_id", "order_id", "released_cash", "status"} <= cancellation_columns
@@ -303,6 +373,11 @@ async def test_head_migration_from_previous_revision_creates_paper_schema() -> N
                 "trg_kalshi_paper_fills_immutable",
                 "trg_kalshi_paper_fills_truncate_immutable",
                 "trg_kalshi_paper_fills_fill_aggregate",
+                "trg_kalshi_paper_fills_validate_sell_evidence",
+                "trg_kalshi_paper_positions_immutable",
+                "trg_kalshi_paper_positions_truncate_immutable",
+                "trg_kalshi_paper_positions_validate",
+                "trg_kalshi_paper_decisions_validate_positions",
                 "trg_kalshi_paper_accounts_validate_journal",
                 "trg_kalshi_paper_orders_immutable",
                 "trg_kalshi_paper_orders_truncate_immutable",
