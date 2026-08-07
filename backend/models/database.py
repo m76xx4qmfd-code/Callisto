@@ -3612,7 +3612,9 @@ class KalshiPaperTestRun(Base):
             name="ck_kalshi_paper_test_runs_prices",
         ),
         CheckConstraint(
-            "stop_loss_minimum_price <= stop_loss_price AND stop_loss_price < take_profit_price",
+            "stop_loss_minimum_price <= stop_loss_price "
+            "AND stop_loss_price < entry_limit_price "
+            "AND entry_limit_price < take_profit_price",
             name="ck_kalshi_paper_test_runs_thresholds",
         ),
         CheckConstraint(

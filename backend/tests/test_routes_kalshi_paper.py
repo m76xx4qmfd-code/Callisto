@@ -227,6 +227,8 @@ def test_paper_test_run_request_is_strict_canonical_and_orders_thresholds() -> N
         {**request.model_dump(), "quantity": "2.0"},
         {**request.model_dump(), "take_profit_price": "0.7"},
         {**request.model_dump(), "stop_loss_minimum_price": "0.500000"},
+        {**request.model_dump(), "entry_limit_price": "0.800000"},
+        {**request.model_dump(), "entry_limit_price": "0.300000"},
         {**request.model_dump(), "take_profit_price": "1.000000"},
     )
     for payload in invalid_payloads:

@@ -75,6 +75,16 @@ def upgrade() -> None:
         """
     )
     op.alter_column("kalshi_paper_test_runs", "request_json", nullable=False)
+    op.execute(
+        "ALTER TABLE kalshi_paper_test_runs "
+        "DROP CONSTRAINT IF EXISTS ck_kalshi_paper_test_runs_thresholds"
+    )
+    op.execute(
+        "ALTER TABLE kalshi_paper_test_runs ADD CONSTRAINT ck_kalshi_paper_test_runs_thresholds "
+        "CHECK (stop_loss_minimum_price <= stop_loss_price "
+        "AND stop_loss_price < entry_limit_price "
+        "AND entry_limit_price < take_profit_price)"
+    )
 
     op.execute("""
         CREATE OR REPLACE FUNCTION protect_kalshi_paper_test_run_request()

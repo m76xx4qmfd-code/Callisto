@@ -108,10 +108,10 @@ class PaperTestRunRequest(BaseModel):
         stop_floor = Decimal(self.stop_loss_minimum_price)
         if not Decimal("0") < entry < Decimal("1"):
             raise ValueError("entry_limit_price must be between zero and one")
-        if not Decimal("0") < stop_floor <= stop_loss < take_profit < Decimal("1"):
+        if not Decimal("0") < stop_floor <= stop_loss < entry < take_profit < Decimal("1"):
             raise ValueError(
-                "require 0 < stop_loss_minimum_price <= stop_loss_price "
-                "< take_profit_price < 1"
+                "prices must require zero < stop_loss_minimum_price <= stop_loss_price "
+                "< entry_limit_price < take_profit_price < one"
             )
         return self
 

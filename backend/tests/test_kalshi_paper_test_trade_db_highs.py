@@ -50,8 +50,9 @@ async def _insert_forged_starting_run(
             "(run_id,request_hash,request_json,account_id,opportunity_id,opportunity_revision,ticker,outcome,quantity,"
             "entry_limit_price,take_profit_price,stop_loss_price,stop_loss_minimum_price,entry_decision_id,"
             "position_id,status,next_event_sequence,last_reason,last_error,created_at,updated_at) "
-            "SELECT CAST(:run_id AS text),:request_hash,:request_json,account_id,opportunity_id,opportunity_revision,ticker,outcome,quantity,"
-            "entry_limit_price,take_profit_price,stop_loss_price,stop_loss_minimum_price,"
+            "SELECT CAST(:run_id AS text),:request_hash,:request_json,account_id,opportunity_id,opportunity_revision,ticker,outcome,"
+            "CAST(:quantity AS numeric),CAST(:entry_limit_price AS numeric),CAST(:take_profit_price AS numeric),"
+            "CAST(:stop_loss_price AS numeric),CAST(:stop_loss_minimum_price AS numeric),"
             "'paper-test-entry:'||CAST(:run_id AS text),NULL,'starting',:next_sequence,'operator_started',NULL,created_at,updated_at "
             "FROM kalshi_paper_test_runs WHERE run_id=:source_run_id"
         ),
@@ -60,6 +61,11 @@ async def _insert_forged_starting_run(
             "source_run_id": request["run_id"],
             "request_hash": digest,
             "request_json": request_json,
+            "quantity": forged_request["quantity"],
+            "entry_limit_price": forged_request["entry_limit_price"],
+            "take_profit_price": forged_request["take_profit_price"],
+            "stop_loss_price": forged_request["stop_loss_price"],
+            "stop_loss_minimum_price": forged_request["stop_loss_minimum_price"],
             "next_sequence": next_sequence,
         },
     )
@@ -117,6 +123,41 @@ async def test_starting_run_rejects_forged_hash_or_initial_event_protocol(
                 started_reason=started_reason,
             )
             with pytest.raises(DBAPIError):
+                await session.commit()
+            await session.rollback()
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.db
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("entry_limit_price", "take_profit_price", "stop_loss_price"),
+    [
+        ("0.800000", "0.700000", "0.400000"),
+        ("0.300000", "0.700000", "0.400000"),
+    ],
+)
+async def test_starting_run_rejects_entry_outside_stop_profit_thresholds(
+    entry_limit_price: str, take_profit_price: str, stop_loss_price: str
+) -> None:
+    engine, factory, _market_data, _paper, service, request = await _test_service("db_high_entry_threshold")
+    try:
+        await service.start_run(**request)
+        forged = dict(
+            request,
+            entry_limit_price=entry_limit_price,
+            take_profit_price=take_profit_price,
+            stop_loss_price=stop_loss_price,
+        )
+        async with factory() as session:
+            with pytest.raises(DBAPIError):
+                await _insert_forged_starting_run(
+                    session,
+                    forged,
+                    suffix=f"bad-entry-{entry_limit_price}",
+                    started_reason="operator_started",
+                )
                 await session.commit()
             await session.rollback()
     finally:
