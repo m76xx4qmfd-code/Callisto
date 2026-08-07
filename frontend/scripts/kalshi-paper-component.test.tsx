@@ -566,6 +566,27 @@ describe('KalshiPaperPanel ambiguous replay across reload', () => {
     expect(localStorage.getItem('callisto:kalshi-paper:pending-test-run')).toBe(JSON.stringify(pending))
   })
 
+  it('quarantines a persisted test run whose entry is outside its stop and take-profit thresholds', async () => {
+    localStorage.setItem('callisto:kalshi-paper:pending-test-run', JSON.stringify({
+      run_id: 'paper-test-run:inverted-thresholds',
+      account_id: 'paper-secondary',
+      opportunity_id: 'opp-live',
+      opportunity_revision: 'a'.repeat(64),
+      quantity: '2.00',
+      entry_limit_price: '0.800000',
+      take_profit_price: '0.700000',
+      stop_loss_price: '0.400000',
+      stop_loss_minimum_price: '0.300000',
+    }))
+
+    mount()
+
+    expect((await screen.findByRole('combobox', { name: 'Paper account' })).hasAttribute('disabled')).toBe(true)
+    expect(screen.getByText(/Persisted retry identity cannot be decoded/)).toBeTruthy()
+    expect(screen.queryByRole('button', { name: 'Retry same immutable test run' })).toBeNull()
+    expect(localStorage.getItem('callisto:kalshi-paper:pending-test-run')).not.toBeNull()
+  })
+
   it('quarantines malformed test-run cache and synchronizes valid pending identity from another tab without replay', async () => {
     localStorage.setItem('callisto:kalshi-paper:pending-test-run', JSON.stringify({
       run_id: 'paper-test-run:bad',

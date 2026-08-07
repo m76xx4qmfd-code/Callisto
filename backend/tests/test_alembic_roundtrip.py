@@ -20,7 +20,10 @@ Both skip when no writable Postgres is reachable.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import sys
+from datetime import datetime
 from decimal import Decimal
 from pathlib import Path
 
@@ -536,6 +539,118 @@ async def test_alembic_replay_base_to_head_on_empty_db() -> None:
             "last_error",
             "stats_json",
         }
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.db
+@pytest.mark.slow
+@pytest.mark.asyncio
+async def test_populated_paper_test_run_upgrades_from_202608070001_to_head() -> None:
+    from alembic.runtime.migration import MigrationContext
+    from sqlalchemy import MetaData, text
+
+    from tests.postgres_test_db import build_postgres_session_factory
+
+    engine = None
+    try:
+        engine, _factory = await build_postgres_session_factory(
+            MetaData(), "alembic_populated_paper_test_upgrade"
+        )
+    except Exception as exc:
+        pytest.skip(f"Postgres unreachable for populated migration test: {exc}")
+
+    assert engine is not None
+    request = {
+        "account_id": "paper-account:migration",
+        "entry_limit_price": "0.600000",
+        "opportunity_id": "opportunity:migration",
+        "opportunity_revision": "a" * 64,
+        "quantity": "2.00",
+        "run_id": "paper-test-run:migration",
+        "stop_loss_minimum_price": "0.300000",
+        "stop_loss_price": "0.400000",
+        "take_profit_price": "0.700000",
+    }
+    request_json = json.dumps(request, sort_keys=True, separators=(",", ":"))
+    request_hash = hashlib.sha256(request_json.encode("utf-8")).hexdigest()
+    created_at = datetime(2026, 8, 7, 12, 0, 0)
+
+    try:
+        async with engine.connect() as conn:
+
+            def _seed_and_upgrade(sync_conn) -> None:
+                cfg = _build_alembic_config(sync_conn)
+                command.upgrade(cfg, "202608070001")
+                sync_conn.execute(
+                    text(
+                        "ALTER TABLE kalshi_paper_test_runs "
+                        "ALTER COLUMN request_json DROP NOT NULL"
+                    )
+                )
+                sync_conn.execute(
+                    text(
+                        "DROP TRIGGER IF EXISTS trg_kalshi_paper_test_runs_validate_insert "
+                        "ON kalshi_paper_test_runs"
+                    )
+                )
+                sync_conn.execute(
+                    text(
+                        "INSERT INTO kalshi_paper_accounts "
+                        "(id,name,currency,starting_cash,cash_balance,reserved_cash,journal_sequence,created_at,updated_at) "
+                        "VALUES (:id,:name,'USD',100,100,0,0,:created_at,:created_at)"
+                    ),
+                    {
+                        "id": request["account_id"],
+                        "name": "Migration paper account",
+                        "created_at": created_at,
+                    },
+                )
+                sync_conn.execute(
+                    text(
+                        "INSERT INTO kalshi_paper_test_runs "
+                        "(run_id,request_hash,account_id,opportunity_id,opportunity_revision,ticker,outcome,"
+                        "quantity,entry_limit_price,take_profit_price,stop_loss_price,stop_loss_minimum_price,"
+                        "entry_decision_id,position_id,status,next_event_sequence,last_reason,last_error,created_at,updated_at) "
+                        "VALUES (:run_id,:request_hash,:account_id,:opportunity_id,:opportunity_revision,'KXMIGRATE','yes',"
+                        ":quantity,:entry_limit_price,:take_profit_price,:stop_loss_price,:stop_loss_minimum_price,"
+                        ":entry_decision_id,NULL,'starting',2,'operator_started',NULL,:created_at,:created_at)"
+                    ),
+                    {
+                        **request,
+                        "request_hash": request_hash,
+                        "entry_decision_id": f"paper-test-entry:{request['run_id']}",
+                        "created_at": created_at,
+                    },
+                )
+                sync_conn.execute(
+                    text(
+                        "INSERT INTO kalshi_paper_test_events "
+                        "(run_id,sequence,account_id,event_type,position_id,best_bid,trigger_price,exit_decision_id,"
+                        "market_observed_at,book_observed_at,quote_evidence_hash,quote_evidence_json,remaining_quantity,"
+                        "realized_pnl,reason,created_at) "
+                        "VALUES (:run_id,1,:account_id,'started',NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,"
+                        "'operator_started',:created_at)"
+                    ),
+                    {
+                        "run_id": request["run_id"],
+                        "account_id": request["account_id"],
+                        "created_at": created_at,
+                    },
+                )
+                sync_conn.commit()
+                command.upgrade(cfg, "head")
+                assert MigrationContext.configure(sync_conn).get_current_revision() == "202608070002"
+                migrated = sync_conn.execute(
+                    text(
+                        "SELECT request_hash,request_json FROM kalshi_paper_test_runs WHERE run_id=:run_id"
+                    ),
+                    {"run_id": request["run_id"]},
+                ).one()
+                assert migrated.request_hash == request_hash
+                assert migrated.request_json == request_json
+
+            await conn.run_sync(_seed_and_upgrade)
     finally:
         await engine.dispose()
 

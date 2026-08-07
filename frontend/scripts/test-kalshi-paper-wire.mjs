@@ -282,6 +282,8 @@ assert.throws(
 assert.throws(() => requireKalshiPaperTestRunInput({ ...testRunInput, quantity: '2.0' }), /quantity scale/i)
 assert.throws(() => requireKalshiPaperTestRunInput({ ...testRunInput, entry_limit_price: '0.6' }), /price scale/i)
 assert.throws(() => requireKalshiPaperTestRunInput({ ...testRunInput, stop_loss_minimum_price: '0.500000' }), /threshold/i)
+assert.throws(() => requireKalshiPaperTestRunInput({ ...testRunInput, entry_limit_price: '0.800000' }), /threshold/i)
+assert.throws(() => requireKalshiPaperTestRunInput({ ...testRunInput, entry_limit_price: '0.300000' }), /threshold/i)
 assert.throws(() => requireKalshiPaperTestRunInput({ ...testRunInput, unexpected: true }), /unknown .*field/i)
 assert.throws(() => requireKalshiPaperTestEvent({ ...testEvent, event_type: 'invented' }), /enum/i)
 assert.throws(() => requireKalshiPaperTestEvent({ ...testEvent, sequence: '1' }), /integer/i)
