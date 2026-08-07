@@ -306,6 +306,22 @@ services:
         condition: service_healthy
     restart: unless-stopped
 
+  worker-kalshi-paper-test:
+    <<: *backend-image
+    container_name: homerun-worker-kalshi-paper-test
+    command: ["python", "-m", "workers.kalshi_paper_test_trade_host"]
+    # Deliberately do not inherit x-backend-env: this paper-only process gets
+    # database connectivity and logging only, never authenticated venue secrets.
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-homerun}:${POSTGRES_PASSWORD:-homerun}@postgres:5432/${POSTGRES_DB:-homerun}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      HOMERUN_PROCESS_ROLE: worker
+      HOMERUN_WORKER_PLANE: kalshi_paper_test
+    depends_on:
+      backend:
+        condition: service_healthy
+    restart: unless-stopped
+
   # ---------------------------------------------------------------------
   # Frontend — nginx serving the built Vite bundle, proxying /api and
   # /ws to the backend.

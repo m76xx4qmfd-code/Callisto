@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from decimal import Decimal
 from typing import Literal, Self
 
 from fastapi import APIRouter, HTTPException, Query
@@ -18,10 +19,23 @@ from services.kalshi_paper_service import (
     PaperPositionNotClosable,
     PaperPositionNotFound,
 )
+from services.kalshi_paper_execution import KalshiPaperMarketDataClient
+from services.kalshi_paper_test_trade_service import (
+    KalshiPaperTestRunConflict,
+    KalshiPaperTestRunNotFound,
+    KalshiPaperTestRunTransition,
+    KalshiPaperTestTradeService,
+)
 from utils.retry import is_retryable_db_error
 
 router = APIRouter()
 paper_service = KalshiPaperService(session_factory=AsyncSessionLocal, database_engine=async_engine)
+paper_test_trade_service = KalshiPaperTestTradeService(
+    session_factory=AsyncSessionLocal,
+    database_engine=async_engine,
+    paper_service=paper_service,
+    market_data_client=KalshiPaperMarketDataClient(),
+)
 
 
 class CreatePaperAccountRequest(BaseModel):
@@ -69,6 +83,37 @@ class PaperExitRequest(BaseModel):
     decision_id: StrictStr = Field(..., min_length=1, max_length=200)
     quantity: StrictStr = Field(..., pattern=r"^(?:0|[1-9][0-9]*)\.[0-9]{2}$", max_length=80)
     minimum_price: StrictStr = Field(..., pattern=r"^(?:0|[1-9][0-9]*)\.[0-9]{6}$", max_length=80)
+
+
+class PaperTestRunRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    run_id: StrictStr = Field(..., min_length=1, max_length=200)
+    account_id: StrictStr = Field(..., min_length=1, max_length=100)
+    opportunity_id: StrictStr = Field(..., min_length=1, max_length=200)
+    opportunity_revision: StrictStr = Field(..., pattern=r"^[0-9a-f]{64}$")
+    quantity: StrictStr = Field(..., pattern=r"^(?:0|[1-9][0-9]*)\.[0-9]{2}$", max_length=80)
+    entry_limit_price: StrictStr = Field(..., pattern=r"^0\.[0-9]{6}$")
+    take_profit_price: StrictStr = Field(..., pattern=r"^0\.[0-9]{6}$")
+    stop_loss_price: StrictStr = Field(..., pattern=r"^0\.[0-9]{6}$")
+    stop_loss_minimum_price: StrictStr = Field(..., pattern=r"^0\.[0-9]{6}$")
+
+    @model_validator(mode="after")
+    def validate_test_run_shape(self) -> Self:
+        if Decimal(self.quantity) <= 0:
+            raise ValueError("quantity must be positive")
+        entry = Decimal(self.entry_limit_price)
+        take_profit = Decimal(self.take_profit_price)
+        stop_loss = Decimal(self.stop_loss_price)
+        stop_floor = Decimal(self.stop_loss_minimum_price)
+        if not Decimal("0") < entry < Decimal("1"):
+            raise ValueError("entry_limit_price must be between zero and one")
+        if not Decimal("0") < stop_floor <= stop_loss < take_profit < Decimal("1"):
+            raise ValueError(
+                "require 0 < stop_loss_minimum_price <= stop_loss_price "
+                "< take_profit_price < 1"
+            )
+        return self
 
 
 def _handle_db_error(exc: OperationalError) -> None:
@@ -200,3 +245,64 @@ async def exit_paper_position(position_id: str, request: PaperExitRequest):
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except OperationalError as exc:
         _handle_db_error(exc)
+
+
+@router.post("/test-runs")
+async def start_paper_test_run(request: PaperTestRunRequest):
+    try:
+        return await paper_test_trade_service.start_run(**request.model_dump())
+    except KalshiPaperTestRunNotFound as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except (KalshiPaperTestRunConflict, KalshiPaperTestRunTransition, IntegrityError) as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except OperationalError as exc:
+        _handle_db_error(exc)
+
+
+@router.get("/accounts/{account_id}/test-runs")
+async def list_paper_test_runs(account_id: str):
+    try:
+        return await paper_test_trade_service.list_runs(account_id)
+    except KalshiPaperTestRunNotFound as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except OperationalError as exc:
+        _handle_db_error(exc)
+
+
+@router.get("/test-runs/{run_id}")
+async def get_paper_test_run(run_id: str):
+    try:
+        return await paper_test_trade_service.get_run(run_id)
+    except KalshiPaperTestRunNotFound as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except OperationalError as exc:
+        _handle_db_error(exc)
+
+
+async def _control_paper_test_run(run_id: str, action: str):
+    try:
+        method = getattr(paper_test_trade_service, f"{action}_run")
+        return await method(run_id)
+    except KalshiPaperTestRunNotFound as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except KalshiPaperTestRunTransition as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except OperationalError as exc:
+        _handle_db_error(exc)
+
+
+@router.post("/test-runs/{run_id}/pause")
+async def pause_paper_test_run(run_id: str):
+    return await _control_paper_test_run(run_id, "pause")
+
+
+@router.post("/test-runs/{run_id}/resume")
+async def resume_paper_test_run(run_id: str):
+    return await _control_paper_test_run(run_id, "resume")
+
+
+@router.post("/test-runs/{run_id}/stop")
+async def stop_paper_test_run(run_id: str):
+    return await _control_paper_test_run(run_id, "stop")

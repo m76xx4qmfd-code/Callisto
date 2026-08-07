@@ -5,6 +5,7 @@ from unittest.mock import AsyncMock
 import pytest
 from fastapi import HTTPException
 from pydantic import ValidationError
+from sqlalchemy.exc import OperationalError
 
 from api import routes_kalshi_paper
 from api.routes_kalshi_paper import (
@@ -12,6 +13,12 @@ from api.routes_kalshi_paper import (
     PaperCancellationRequest,
     PaperDecisionRequest,
     PaperExitRequest,
+    PaperTestRunRequest,
+)
+from services.kalshi_paper_test_trade_service import (
+    KalshiPaperTestRunConflict,
+    KalshiPaperTestRunNotFound,
+    KalshiPaperTestRunTransition,
 )
 from services.kalshi_paper_service import (
     PaperAccountNotFound,
@@ -204,3 +211,98 @@ async def test_position_routes_delegate_and_map_exit_boundaries(monkeypatch) -> 
     with pytest.raises(HTTPException) as terminal:
         await routes_kalshi_paper.exit_paper_position("position", request)
     assert terminal.value.status_code == 409
+
+
+def test_paper_test_run_request_is_strict_canonical_and_orders_thresholds() -> None:
+    request = PaperTestRunRequest(
+        run_id="run-1", account_id="account", opportunity_id="opportunity",
+        opportunity_revision="a" * 64, quantity="2.00", entry_limit_price="0.600000",
+        take_profit_price="0.700000", stop_loss_price="0.400000",
+        stop_loss_minimum_price="0.300000",
+    )
+    assert request.quantity == "2.00"
+    invalid_payloads = (
+        {**request.model_dump(), "extra": True},
+        {**request.model_dump(), "quantity": 2},
+        {**request.model_dump(), "quantity": "2.0"},
+        {**request.model_dump(), "take_profit_price": "0.7"},
+        {**request.model_dump(), "stop_loss_minimum_price": "0.500000"},
+        {**request.model_dump(), "take_profit_price": "1.000000"},
+    )
+    for payload in invalid_payloads:
+        with pytest.raises(ValidationError):
+            PaperTestRunRequest.model_validate(payload)
+
+
+@pytest.mark.asyncio
+async def test_paper_test_run_routes_delegate_and_map_domain_errors(monkeypatch) -> None:
+    request = PaperTestRunRequest(
+        run_id="run-1", account_id="account", opportunity_id="opportunity",
+        opportunity_revision="a" * 64, quantity="2.00", entry_limit_price="0.600000",
+        take_profit_price="0.700000", stop_loss_price="0.400000",
+        stop_loss_minimum_price="0.300000",
+    )
+    start = AsyncMock(return_value={"run": {"run_id": "run-1"}, "events": []})
+    monkeypatch.setattr(routes_kalshi_paper.paper_test_trade_service, "start_run", start)
+    assert (await routes_kalshi_paper.start_paper_test_run(request))["run"]["run_id"] == "run-1"
+    start.assert_awaited_once_with(**request.model_dump())
+
+    get_run = AsyncMock(side_effect=KalshiPaperTestRunNotFound("missing"))
+    monkeypatch.setattr(routes_kalshi_paper.paper_test_trade_service, "get_run", get_run)
+    with pytest.raises(HTTPException) as missing:
+        await routes_kalshi_paper.get_paper_test_run("missing")
+    assert missing.value.status_code == 404
+
+    start.side_effect = KalshiPaperTestRunConflict("conflict")
+    with pytest.raises(HTTPException) as conflict:
+        await routes_kalshi_paper.start_paper_test_run(request)
+    assert conflict.value.status_code == 409
+
+    pause = AsyncMock(side_effect=KalshiPaperTestRunTransition("illegal"))
+    monkeypatch.setattr(routes_kalshi_paper.paper_test_trade_service, "pause_run", pause)
+    with pytest.raises(HTTPException) as illegal:
+        await routes_kalshi_paper.pause_paper_test_run("run-1")
+    assert illegal.value.status_code == 409
+
+
+@pytest.mark.asyncio
+async def test_paper_test_run_list_and_controls_delegate(monkeypatch) -> None:
+    service = routes_kalshi_paper.paper_test_trade_service
+    list_runs = AsyncMock(return_value=[])
+    pause = AsyncMock(return_value={"run": {"status": "paused"}, "events": []})
+    resume = AsyncMock(return_value={"run": {"status": "monitoring"}, "events": []})
+    stop = AsyncMock(return_value={"run": {"status": "stopped"}, "events": []})
+    monkeypatch.setattr(service, "list_runs", list_runs)
+    monkeypatch.setattr(service, "pause_run", pause)
+    monkeypatch.setattr(service, "resume_run", resume)
+    monkeypatch.setattr(service, "stop_run", stop)
+
+    assert await routes_kalshi_paper.list_paper_test_runs("account") == []
+    assert (await routes_kalshi_paper.pause_paper_test_run("run"))["run"]["status"] == "paused"
+    assert (await routes_kalshi_paper.resume_paper_test_run("run"))["run"]["status"] == "monitoring"
+    assert (await routes_kalshi_paper.stop_paper_test_run("run"))["run"]["status"] == "stopped"
+    list_runs.assert_awaited_once_with("account")
+    pause.assert_awaited_once_with("run")
+    resume.assert_awaited_once_with("run")
+    stop.assert_awaited_once_with("run")
+
+
+@pytest.mark.asyncio
+async def test_paper_test_run_route_maps_retryable_database_error(monkeypatch) -> None:
+    request = PaperTestRunRequest(
+        run_id="run-1", account_id="account", opportunity_id="opportunity",
+        opportunity_revision="a" * 64, quantity="2.00", entry_limit_price="0.600000",
+        take_profit_price="0.700000", stop_loss_price="0.400000",
+        stop_loss_minimum_price="0.300000",
+    )
+    database_error = OperationalError("SELECT", {}, RuntimeError("serialization failure"))
+    monkeypatch.setattr(
+        routes_kalshi_paper.paper_test_trade_service,
+        "start_run",
+        AsyncMock(side_effect=database_error),
+    )
+    monkeypatch.setattr(routes_kalshi_paper, "is_retryable_db_error", lambda exc: True)
+    with pytest.raises(HTTPException) as retryable:
+        await routes_kalshi_paper.start_paper_test_run(request)
+    assert retryable.value.status_code == 503
+    assert "retry" in str(retryable.value.detail).lower()

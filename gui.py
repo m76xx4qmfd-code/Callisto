@@ -231,6 +231,7 @@ FRONTEND_PORT = 5173
 # trading plane and starving the wallet-state reseeder.  See the
 # ``discovery`` plane comment in ``backend/workers/host.py``.
 _WORKER_PLANES = (
+    ("KALSHI PAPER TEST", "kalshi_paper_test"),
     ("KALSHI PORTFOLIO", "kalshi_portfolio"),
     ("WORKERS", "trading"),
     ("NEWS", "news"),
@@ -269,9 +270,11 @@ _WORKER_PLANES = (
 )
 _WORKER_SOURCE_TAG_BY_PLANE = {pn: st for st, pn in _WORKER_PLANES}
 _WORKER_ENTRYPOINT_BY_PLANE = {
+    "kalshi_paper_test": "workers.kalshi_paper_test_trade_host",
     "kalshi_portfolio": "workers.kalshi_portfolio_host",
 }
 _WORKER_PLANE_BY_NAME: dict[str, str] = {
+    "kalshi_paper_test_trades": "kalshi_paper_test",
     "kalshi_portfolio_sync": "kalshi_portfolio",
     "scanner": "detection", "scanner_slo": "detection",
     "market_universe": "detection", "search_index": "detection",
@@ -283,6 +286,19 @@ _WORKER_PLANE_BY_NAME: dict[str, str] = {
     "tracked_traders": "discovery", "discovery": "discovery",
     "weather": "news", "news": "news",
 }
+
+_PAPER_WORKER_CREDENTIAL_PREFIXES = ("KALSHI_", "POLYMARKET_")
+_PAPER_WORKER_CREDENTIAL_NAMES = frozenset({"APP_SECRETS_KEY"})
+
+
+def _strip_paper_worker_credentials(environment: dict[str, str]) -> dict[str, str]:
+    """Return a copy without authenticated venue credential material."""
+    return {
+        key: value
+        for key, value in environment.items()
+        if key not in _PAPER_WORKER_CREDENTIAL_NAMES
+        and not key.startswith(_PAPER_WORKER_CREDENTIAL_PREFIXES)
+    }
 
 # Zero-cost-when-disabled: core planes (trading/recording/reconciliation) always
 # run; these are gated by their subsystem's GLOBAL enable toggle so a disabled
@@ -330,6 +346,7 @@ _WORKER_SHORT_NAMES: dict[str, str] = {
 }
 
 WORKER_STATUS_ORDER: list[tuple[str, str]] = [
+    ("kalshi_paper_test_trades", "KALSHI PAPER TEST"),
     ("kalshi_portfolio_sync", "KALSHI PORTFOLIO"),
     ("scanner", "SCANNER"), ("scanner_slo", "SCANNER SLO"),
     ("discovery", "DISCOVERY"), ("weather", "WEATHER"),
@@ -340,6 +357,7 @@ WORKER_STATUS_ORDER: list[tuple[str, str]] = [
 ]
 
 WORKER_TAG_TO_NAME: dict[str, str] = {
+    "KALSHI PAPER TEST": "kalshi_paper_test_trades",
     "KALSHI PORTFOLIO": "kalshi_portfolio_sync",
     "SCANNER": "scanner", "SCANNER SLO": "scanner_slo",
     "DISCOVERY": "discovery", "WEATHER": "weather",
@@ -350,6 +368,7 @@ WORKER_TAG_TO_NAME: dict[str, str] = {
 }
 
 WORKER_BACKEND_HINTS: tuple[tuple[str, str], ...] = (
+    ("kalshi_paper_test_trades", "kalshi_paper_test_trades"),
     ("kalshi_portfolio_sync", "kalshi_portfolio_sync"),
     ("scanner", "scanner"), ("scanner_slo", "scanner_slo"),
     ("discovery", "discovery"), ("weather", "weather"),
@@ -1824,6 +1843,8 @@ class CallistoApp:
     def _spawn_worker_plane(self, plane_name: str, *, reason: str) -> subprocess.Popen:
         source_tag = _WORKER_SOURCE_TAG_BY_PLANE[plane_name]
         env = self._build_runtime_env(process_role="worker")
+        if plane_name == "kalshi_paper_test":
+            env = _strip_paper_worker_credentials(env)
         # Debug log-file teeing: when ``HOMERUN_DEBUG=1`` is set
         # (typically by the ``-Debug`` flag on the launcher), the
         # worker also writes its full JSON log stream to a per-plane

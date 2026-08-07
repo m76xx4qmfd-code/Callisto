@@ -77,6 +77,7 @@ DEFAULT_WORKER_INTERVALS: dict[str, int] = {
     "discovery": 3600,
     "events": 300,
     "kalshi_portfolio_sync": 5,
+    "kalshi_paper_test_trades": 2,
 }
 DEFAULT_DISABLED_WORKERS = frozenset({"kalshi_portfolio_sync"})
 DB_RETRY_ATTEMPTS = 3
