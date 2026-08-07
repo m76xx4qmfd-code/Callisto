@@ -19,6 +19,7 @@ from services.kalshi_paper_execution import (
 )
 from services.kalshi_paper_service import (
     PaperPositionNotClosable,
+    PaperUnresolvedExitIntent,
     _canonical_json,
     _sha256,
 )
@@ -333,7 +334,9 @@ async def test_incomplete_sell_intent_restarts_to_rejection_without_a_second_quo
             ))
             await session.commit()
 
-        with pytest.raises(PaperPositionNotClosable, match="unresolved exit intent exit-restart"):
+        with pytest.raises(
+            PaperUnresolvedExitIntent, match="unresolved exit intent exit-restart"
+        ) as unresolved:
             await service.record_exit(
                 account_id=account_id,
                 decision_id="exit-intervening",
@@ -341,6 +344,7 @@ async def test_incomplete_sell_intent_restarts_to_rejection_without_a_second_quo
                 quantity="1.00",
                 minimum_price="0.400000",
             )
+        assert unresolved.value.decision_id == "exit-restart"
         assert market_data.fetch_quote.await_count == 1
 
         result = await service.record_exit(

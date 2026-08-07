@@ -794,12 +794,20 @@ export async function getKalshiPaperDecisions(
 export async function recordKalshiPaperDecision(input: KalshiPaperDecisionInput): Promise<KalshiPaperDecision> {
   const { data } = await api.post('/kalshi/paper/decisions', input)
   const decision = requireKalshiPaperDecision(unwrapApiData(data))
+  const expectedQuantity = input.action === 'execute' ? input.quantity : null
+  const expectedLimitPrice = input.action === 'execute' ? input.limit_price : null
+  const expectedTimeInForce = input.action === 'execute'
+    ? (input.time_in_force ?? 'immediate_or_cancel')
+    : null
   if (
     decision.account_id !== input.account_id
     || decision.decision_id !== input.decision_id
     || decision.opportunity_id !== input.opportunity_id
     || decision.opportunity_revision !== input.opportunity_revision
     || decision.action !== input.action
+    || decision.requested_quantity !== expectedQuantity
+    || decision.limit_price !== expectedLimitPrice
+    || decision.time_in_force !== expectedTimeInForce
   ) {
     throw new Error('Kalshi paper decision response identity mismatch')
   }

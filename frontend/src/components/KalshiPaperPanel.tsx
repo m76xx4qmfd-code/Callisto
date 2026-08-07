@@ -38,6 +38,53 @@ const PENDING_ATTEMPT_KEY = 'callisto:kalshi-paper:pending-attempt'
 const PENDING_CANCELLATION_KEY = 'callisto:kalshi-paper:pending-cancellation'
 const PENDING_POSITION_EXIT_KEY = 'callisto:kalshi-paper:pending-position-exit'
 const PENDING_TEST_RUN_KEY = 'callisto:kalshi-paper:pending-test-run'
+const PENDING_KEYS = [
+  PENDING_ATTEMPT_KEY,
+  PENDING_CANCELLATION_KEY,
+  PENDING_POSITION_EXIT_KEY,
+  PENDING_TEST_RUN_KEY,
+] as const
+
+function assertPendingNamespaceEmpty(): void {
+  if (PENDING_KEYS.some((key) => localStorage.getItem(key) !== null)) {
+    throw new Error('Another paper mutation has an unresolved persisted identity')
+  }
+}
+
+function assertExclusivePendingIdentity(key: string, expectedSerialized: string): void {
+  if (
+    localStorage.getItem(key) !== expectedSerialized
+    || PENDING_KEYS.some((pendingKey) => pendingKey !== key && localStorage.getItem(pendingKey) !== null)
+  ) {
+    throw new Error('Persisted paper mutation identity changed; retry remains frozen')
+  }
+}
+
+function removePendingIfExact(key: string, expectedSerialized: string): boolean {
+  if (localStorage.getItem(key) !== expectedSerialized) return false
+  localStorage.removeItem(key)
+  return true
+}
+
+async function withPendingMutationLock<T>(operation: () => Promise<T>): Promise<T> {
+  if (!navigator.locks) throw new Error('Browser financial-mutation locking is unavailable')
+  return navigator.locks.request(
+    'callisto:kalshi-paper:financial-mutation',
+    { mode: 'exclusive', ifAvailable: true },
+    async (lock) => {
+      if (lock === null) throw new Error('Another tab is starting a paper financial mutation')
+      return operation()
+    },
+  )
+}
+
+function canonicalDecimalInput(value: string, scale: number, field: string): string {
+  const match = /^(0|[1-9]\d*)(?:\.(\d*))?$/.exec(value.trim())
+  if (!match || (match[2]?.length ?? 0) > scale) {
+    throw new Error(`${field} must be an exact nonnegative decimal with at most ${scale} places`)
+  }
+  return `${match[1]}.${(match[2] ?? '').padEnd(scale, '0')}`
+}
 
 function newDecisionId(): string {
   return `paper:${crypto.randomUUID()}`
@@ -107,12 +154,13 @@ function statusTone(status: string): string {
 export default function KalshiPaperPanel() {
   const queryClient = useQueryClient()
   const [pendingAttempt, setPendingAttempt] = useState<KalshiPaperDecisionInput | null>(loadPendingAttempt)
+  const [pendingAttemptBytes, setPendingAttemptBytes] = useState(() => localStorage.getItem(PENDING_ATTEMPT_KEY))
   const [pendingCancellation, setPendingCancellation] = useState<KalshiPaperCancellationInput | null>(loadPendingCancellation)
+  const [pendingCancellationBytes, setPendingCancellationBytes] = useState(() => localStorage.getItem(PENDING_CANCELLATION_KEY))
   const [pendingPositionExit, setPendingPositionExit] = useState<KalshiPaperPositionExitInput | null>(loadPendingPositionExit)
+  const [pendingPositionExitBytes, setPendingPositionExitBytes] = useState(() => localStorage.getItem(PENDING_POSITION_EXIT_KEY))
   const [pendingTestRun, setPendingTestRun] = useState<KalshiPaperTestRunInput | null>(loadPendingTestRun)
-  const [pendingTestRunUnreadable, setPendingTestRunUnreadable] = useState(
-    () => localStorage.getItem(PENDING_TEST_RUN_KEY) !== null && loadPendingTestRun() === null,
-  )
+  const [pendingTestRunBytes, setPendingTestRunBytes] = useState(() => localStorage.getItem(PENDING_TEST_RUN_KEY))
   const [selectedAccountId, setSelectedAccountId] = useState(
     pendingAttempt?.account_id
       ?? pendingCancellation?.account_id
@@ -139,19 +187,86 @@ export default function KalshiPaperPanel() {
   )
   const [decisionId, setDecisionId] = useState(pendingAttempt?.decision_id ?? newDecisionId)
   const [lastDecision, setLastDecision] = useState<KalshiPaperDecision | null>(null)
+  const [lastDecisionAttemptBytes, setLastDecisionAttemptBytes] = useState<string | null>(null)
   const [selectedPositionId, setSelectedPositionId] = useState(pendingPositionExit?.position_id ?? '')
   const [exitQuantity, setExitQuantity] = useState(pendingPositionExit?.quantity ?? '')
   const [minimumExitPrice, setMinimumExitPrice] = useState(pendingPositionExit?.minimum_price ?? '0.010000')
 
   useEffect(() => {
-    const synchronizePendingTestRun = (event: StorageEvent) => {
+    const synchronizePendingStorage = (event: StorageEvent) => {
+      if (event.key === PENDING_ATTEMPT_KEY) {
+        if (event.newValue === null) {
+          if (localStorage.getItem(PENDING_ATTEMPT_KEY) !== null) return
+          setPendingAttemptBytes(null)
+          setPendingAttempt(null)
+          setDecisionId(newDecisionId())
+          return
+        }
+        setPendingAttemptBytes(event.newValue)
+        try {
+          const payload = requireKalshiPaperDecisionInput(JSON.parse(event.newValue))
+          setPendingAttempt(payload)
+          setSelectedAccountId(payload.account_id)
+          setOpportunityId(payload.opportunity_id)
+          setEligibility(null)
+          setDecisionId(payload.decision_id)
+          setQuantity(payload.quantity ?? '1.00')
+          setLimitPrice(payload.limit_price ?? '0.500000')
+          setTimeInForce(payload.time_in_force ?? 'immediate_or_cancel')
+          setLastDecision(null)
+          setLastDecisionAttemptBytes(null)
+          recordDecision.reset()
+        } catch {
+          setPendingAttempt(null)
+        }
+        return
+      }
+      if (event.key === PENDING_CANCELLATION_KEY) {
+        if (event.newValue === null) {
+          if (localStorage.getItem(PENDING_CANCELLATION_KEY) !== null) return
+          setPendingCancellationBytes(null)
+          setPendingCancellation(null)
+          return
+        }
+        setPendingCancellationBytes(event.newValue)
+        try {
+          const payload = requireKalshiPaperCancellationInput(JSON.parse(event.newValue))
+          setPendingCancellation(payload)
+          setSelectedAccountId(payload.account_id)
+        } catch {
+          setPendingCancellation(null)
+        }
+        return
+      }
+      if (event.key === PENDING_POSITION_EXIT_KEY) {
+        if (event.newValue === null) {
+          if (localStorage.getItem(PENDING_POSITION_EXIT_KEY) !== null) return
+          setPendingPositionExitBytes(null)
+          setPendingPositionExit(null)
+          return
+        }
+        setPendingPositionExitBytes(event.newValue)
+        try {
+          const payload = requireKalshiPaperPositionExitInput(JSON.parse(event.newValue))
+          setPendingPositionExit(payload)
+          setSelectedAccountId(payload.account_id)
+          setSelectedPositionId(payload.position_id)
+          setExitQuantity(payload.quantity)
+          setMinimumExitPrice(payload.minimum_price)
+        } catch {
+          setPendingPositionExit(null)
+        }
+        return
+      }
       if (event.key !== PENDING_TEST_RUN_KEY) return
       if (event.newValue === null) {
+        if (localStorage.getItem(PENDING_TEST_RUN_KEY) !== null) return
+        setPendingTestRunBytes(null)
         setPendingTestRun(null)
-        setPendingTestRunUnreadable(false)
         setTestRunId(newTestRunId())
         return
       }
+      setPendingTestRunBytes(event.newValue)
       try {
         const payload = requireKalshiPaperTestRunInput(JSON.parse(event.newValue))
         setPendingTestRun(payload)
@@ -164,14 +279,12 @@ export default function KalshiPaperPanel() {
         setTakeProfitPrice(payload.take_profit_price)
         setStopLossPrice(payload.stop_loss_price)
         setStopLossMinimumPrice(payload.stop_loss_minimum_price)
-        setPendingTestRunUnreadable(false)
       } catch {
         setPendingTestRun(null)
-        setPendingTestRunUnreadable(true)
       }
     }
-    window.addEventListener('storage', synchronizePendingTestRun)
-    return () => window.removeEventListener('storage', synchronizePendingTestRun)
+    window.addEventListener('storage', synchronizePendingStorage)
+    return () => window.removeEventListener('storage', synchronizePendingStorage)
   }, [])
 
   const accountsQuery = useQuery({
@@ -211,7 +324,10 @@ export default function KalshiPaperPanel() {
   })
 
   const createAccount = useMutation({
-    mutationFn: () => createKalshiPaperAccount({ name: accountName, starting_cash: startingCash }),
+    mutationFn: () => {
+      assertPendingNamespaceEmpty()
+      return createKalshiPaperAccount({ name: accountName, starting_cash: startingCash })
+    },
     onSuccess: async (account) => {
       if (
         localStorage.getItem(PENDING_ATTEMPT_KEY) === null
@@ -236,25 +352,38 @@ export default function KalshiPaperPanel() {
     },
   })
   const recordDecision = useMutation({
-    mutationFn: (action: 'execute' | 'pass') => {
+    mutationFn: (action: 'execute' | 'pass') => withPendingMutationLock(async () => {
       let payload = pendingAttempt
+      let submittedBytes = pendingAttemptBytes
       if (payload === null) {
         if (!activeAccountId || !eligibility) throw new Error('Select an account and validate an opportunity first')
+        assertPendingNamespaceEmpty()
         payload = {
           account_id: activeAccountId,
           decision_id: decisionId,
           opportunity_id: opportunityId.trim(),
           opportunity_revision: eligibility.opportunity_revision,
           action,
-          ...(action === 'execute' ? { quantity, limit_price: limitPrice, time_in_force: timeInForce } : {}),
+          ...(action === 'execute' ? {
+            quantity: canonicalDecimalInput(quantity, 2, 'Quantity'),
+            limit_price: canonicalDecimalInput(limitPrice, 6, 'Maximum price'),
+            time_in_force: timeInForce,
+          } : {}),
         }
-        localStorage.setItem(PENDING_ATTEMPT_KEY, JSON.stringify(payload))
+        submittedBytes = JSON.stringify(payload)
+        localStorage.setItem(PENDING_ATTEMPT_KEY, submittedBytes)
         setPendingAttempt(payload)
+        setPendingAttemptBytes(submittedBytes)
       }
-      return recordKalshiPaperDecision(payload)
-    },
-    onSuccess: async (decision) => {
-      setLastDecision(decision)
+      if (submittedBytes === null) throw new Error('Pending decision bytes are unavailable')
+      assertExclusivePendingIdentity(PENDING_ATTEMPT_KEY, submittedBytes)
+      return { decision: await recordKalshiPaperDecision(payload), submittedBytes }
+    }),
+    onSuccess: async ({ decision, submittedBytes }) => {
+      if (localStorage.getItem(PENDING_ATTEMPT_KEY) === submittedBytes) {
+        setLastDecision(decision)
+        setLastDecisionAttemptBytes(submittedBytes)
+      }
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: ['kalshi-paper-accounts'] }),
         queryClient.invalidateQueries({ queryKey: ['kalshi-paper-decisions', activeAccountId] }),
@@ -262,10 +391,12 @@ export default function KalshiPaperPanel() {
     },
   })
   const startTestRun = useMutation({
-    mutationFn: () => {
+    mutationFn: () => withPendingMutationLock(async () => {
       let payload = pendingTestRun
+      let submittedBytes = pendingTestRunBytes
       if (payload === null) {
         if (!activeAccountId || !eligibility) throw new Error('Select an account and validate an opportunity first')
+        assertPendingNamespaceEmpty()
         payload = requireKalshiPaperTestRunInput({
           run_id: testRunId,
           account_id: activeAccountId,
@@ -277,40 +408,19 @@ export default function KalshiPaperPanel() {
           stop_loss_price: stopLossPrice,
           stop_loss_minimum_price: stopLossMinimumPrice,
         })
-        localStorage.setItem(PENDING_TEST_RUN_KEY, JSON.stringify(payload))
+        submittedBytes = JSON.stringify(payload)
+        localStorage.setItem(PENDING_TEST_RUN_KEY, submittedBytes)
         setPendingTestRun(payload)
+        setPendingTestRunBytes(submittedBytes)
       }
-      return startKalshiPaperTestRun(payload)
-    },
-    onSuccess: async ({ run }) => {
-      const acknowledgedPayload: KalshiPaperTestRunInput = {
-        run_id: run.run_id,
-        account_id: run.account_id,
-        opportunity_id: run.opportunity_id,
-        opportunity_revision: run.opportunity_revision,
-        quantity: run.quantity,
-        entry_limit_price: run.entry_limit_price,
-        take_profit_price: run.take_profit_price,
-        stop_loss_price: run.stop_loss_price,
-        stop_loss_minimum_price: run.stop_loss_minimum_price,
-      }
-      const stored = localStorage.getItem(PENDING_TEST_RUN_KEY)
-      if (stored === JSON.stringify(acknowledgedPayload)) {
-        localStorage.removeItem(PENDING_TEST_RUN_KEY)
+      if (submittedBytes === null) throw new Error('Pending test-run bytes are unavailable')
+      assertExclusivePendingIdentity(PENDING_TEST_RUN_KEY, submittedBytes)
+      return { detail: await startKalshiPaperTestRun(payload), submittedBytes }
+    }),
+    onSuccess: async ({ detail: { run }, submittedBytes }) => {
+      if (removePendingIfExact(PENDING_TEST_RUN_KEY, submittedBytes)) {
         setPendingTestRun(null)
-        setPendingTestRunUnreadable(false)
-        setTestRunId(newTestRunId())
-      } else if (stored !== null) {
-        try {
-          setPendingTestRun(requireKalshiPaperTestRunInput(JSON.parse(stored)))
-          setPendingTestRunUnreadable(false)
-        } catch {
-          setPendingTestRun(null)
-          setPendingTestRunUnreadable(true)
-        }
-      } else {
-        setPendingTestRun(null)
-        setPendingTestRunUnreadable(false)
+        setPendingTestRunBytes(null)
         setTestRunId(newTestRunId())
       }
       await Promise.all([
@@ -323,6 +433,7 @@ export default function KalshiPaperPanel() {
   })
   const controlTestRun = useMutation({
     mutationFn: ({ runId, action }: { runId: string; action: 'pause' | 'resume' | 'stop' }) => {
+      assertPendingNamespaceEmpty()
       if (action === 'pause') return pauseKalshiPaperTestRun(runId)
       if (action === 'resume') return resumeKalshiPaperTestRun(runId)
       return stopKalshiPaperTestRun(runId)
@@ -332,23 +443,31 @@ export default function KalshiPaperPanel() {
     },
   })
   const cancelOrder = useMutation({
-    mutationFn: (orderId?: string) => {
+    mutationFn: (orderId?: string) => withPendingMutationLock(async () => {
       let payload = pendingCancellation
+      let submittedBytes = pendingCancellationBytes
       if (payload === null) {
         if (!activeAccountId || !orderId) throw new Error('An authoritative open order is required')
+        assertPendingNamespaceEmpty()
         payload = {
           account_id: activeAccountId,
           order_id: orderId,
           cancellation_id: `paper-cancel:${crypto.randomUUID()}`,
         }
-        localStorage.setItem(PENDING_CANCELLATION_KEY, JSON.stringify(payload))
+        submittedBytes = JSON.stringify(payload)
+        localStorage.setItem(PENDING_CANCELLATION_KEY, submittedBytes)
         setPendingCancellation(payload)
+        setPendingCancellationBytes(submittedBytes)
       }
-      return cancelKalshiPaperOrder(payload)
-    },
-    onSuccess: async () => {
-      localStorage.removeItem(PENDING_CANCELLATION_KEY)
-      setPendingCancellation(null)
+      if (submittedBytes === null) throw new Error('Pending cancellation bytes are unavailable')
+      assertExclusivePendingIdentity(PENDING_CANCELLATION_KEY, submittedBytes)
+      return { cancellation: await cancelKalshiPaperOrder(payload), submittedBytes }
+    }),
+    onSuccess: async ({ submittedBytes }) => {
+      if (removePendingIfExact(PENDING_CANCELLATION_KEY, submittedBytes)) {
+        setPendingCancellation(null)
+        setPendingCancellationBytes(null)
+      }
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: ['kalshi-paper-accounts'] }),
         queryClient.invalidateQueries({ queryKey: ['kalshi-paper-orders', activeAccountId] }),
@@ -356,10 +475,12 @@ export default function KalshiPaperPanel() {
     },
   })
   const exitPosition = useMutation({
-    mutationFn: (positionId?: string) => {
+    mutationFn: (positionId?: string) => withPendingMutationLock(async () => {
       let payload = pendingPositionExit
+      let submittedBytes = pendingPositionExitBytes
       if (payload === null) {
         if (!activeAccountId || !positionId) throw new Error('An authoritative open position is required')
+        assertPendingNamespaceEmpty()
         payload = {
           account_id: activeAccountId,
           position_id: positionId,
@@ -368,16 +489,22 @@ export default function KalshiPaperPanel() {
           minimum_price: minimumExitPrice,
         }
         requireKalshiPaperPositionExitInput(payload)
-        localStorage.setItem(PENDING_POSITION_EXIT_KEY, JSON.stringify(payload))
+        submittedBytes = JSON.stringify(payload)
+        localStorage.setItem(PENDING_POSITION_EXIT_KEY, submittedBytes)
         setPendingPositionExit(payload)
+        setPendingPositionExitBytes(submittedBytes)
       }
-      return exitKalshiPaperPosition(payload)
-    },
-    onSuccess: async () => {
-      localStorage.removeItem(PENDING_POSITION_EXIT_KEY)
-      setPendingPositionExit(null)
-      setSelectedPositionId('')
-      setExitQuantity('')
+      if (submittedBytes === null) throw new Error('Pending position-exit bytes are unavailable')
+      assertExclusivePendingIdentity(PENDING_POSITION_EXIT_KEY, submittedBytes)
+      return { decision: await exitKalshiPaperPosition(payload), submittedBytes }
+    }),
+    onSuccess: async ({ submittedBytes }) => {
+      if (removePendingIfExact(PENDING_POSITION_EXIT_KEY, submittedBytes)) {
+        setPendingPositionExit(null)
+        setPendingPositionExitBytes(null)
+        setSelectedPositionId('')
+        setExitQuantity('')
+      }
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: ['kalshi-paper-accounts'] }),
         queryClient.invalidateQueries({ queryKey: ['kalshi-paper-decisions', activeAccountId] }),
@@ -387,25 +514,33 @@ export default function KalshiPaperPanel() {
   })
 
   const startNewDecision = () => {
-    localStorage.removeItem(PENDING_ATTEMPT_KEY)
-    setPendingAttempt(null)
-    setDecisionId(newDecisionId())
-    setLastDecision(null)
-    recordDecision.reset()
+    if (lastDecisionAttemptBytes !== null && removePendingIfExact(PENDING_ATTEMPT_KEY, lastDecisionAttemptBytes)) {
+      setPendingAttempt(null)
+      setPendingAttemptBytes(null)
+      setDecisionId(newDecisionId())
+      setLastDecision(null)
+      setLastDecisionAttemptBytes(null)
+      recordDecision.reset()
+    }
   }
   const attemptAction = pendingAttempt?.action ?? null
-  const unreadableRetryState = (
-    localStorage.getItem(PENDING_ATTEMPT_KEY) !== null && pendingAttempt === null
-  ) || (
-    localStorage.getItem(PENDING_CANCELLATION_KEY) !== null && pendingCancellation === null
-  ) || (
-    localStorage.getItem(PENDING_POSITION_EXIT_KEY) !== null && pendingPositionExit === null
-  ) || pendingTestRunUnreadable
+  const unreadableRetryState = (pendingAttemptBytes !== null && pendingAttempt === null)
+    || (pendingCancellationBytes !== null && pendingCancellation === null)
+    || (pendingPositionExitBytes !== null && pendingPositionExit === null)
+    || (pendingTestRunBytes !== null && pendingTestRun === null)
   const inputFrozen = pendingAttempt !== null
     || pendingCancellation !== null
     || pendingPositionExit !== null
     || pendingTestRun !== null
     || unreadableRetryState
+  const decisionRetryBlocked = pendingAttempt === null || pendingAttemptBytes === null
+    || pendingCancellationBytes !== null || pendingPositionExitBytes !== null || pendingTestRunBytes !== null
+  const cancellationRetryBlocked = pendingCancellation === null || pendingCancellationBytes === null
+    || pendingAttemptBytes !== null || pendingPositionExitBytes !== null || pendingTestRunBytes !== null
+  const positionExitRetryBlocked = pendingPositionExit === null || pendingPositionExitBytes === null
+    || pendingAttemptBytes !== null || pendingCancellationBytes !== null || pendingTestRunBytes !== null
+  const testRunRetryBlocked = pendingTestRun === null || pendingTestRunBytes === null
+    || pendingAttemptBytes !== null || pendingCancellationBytes !== null || pendingPositionExitBytes !== null
   const authoritativeError = Boolean(
     accountsQuery.error || ordersQuery.error || positionsQuery.error || testRunsQuery.error,
   )
@@ -538,11 +673,11 @@ export default function KalshiPaperPanel() {
             <div className="grid gap-2 sm:grid-cols-2">
               <div>
                 <label className="mb-1 block text-[10px] uppercase tracking-wider text-muted-foreground">Quantity</label>
-                <Input value={quantity} disabled={inputFrozen} onChange={(event) => setQuantity(event.target.value)} inputMode="decimal" />
+                <Input aria-label="Quantity" value={quantity} disabled={inputFrozen} onChange={(event) => setQuantity(event.target.value)} inputMode="decimal" />
               </div>
               <div>
                 <label className="mb-1 block text-[10px] uppercase tracking-wider text-muted-foreground">Maximum price</label>
-                <Input value={limitPrice} disabled={inputFrozen} onChange={(event) => setLimitPrice(event.target.value)} inputMode="decimal" />
+                <Input aria-label="Maximum price" value={limitPrice} disabled={inputFrozen} onChange={(event) => setLimitPrice(event.target.value)} inputMode="decimal" />
               </div>
             </div>
             <div>
@@ -572,7 +707,7 @@ export default function KalshiPaperPanel() {
               <div className="flex flex-wrap items-center gap-2">
                 {!lastDecision && (
                   <Button
-                    disabled={recordDecision.isPending || pendingCancellation !== null}
+                    disabled={recordDecision.isPending || decisionRetryBlocked}
                     onClick={() => recordDecision.mutate(attemptAction)}
                   >
                     <RotateCcw className="mr-1.5 h-3.5 w-3.5" />
@@ -685,7 +820,7 @@ export default function KalshiPaperPanel() {
                 <Button
                   className="mt-2"
                   size="sm"
-                  disabled={startTestRun.isPending}
+                  disabled={startTestRun.isPending || testRunRetryBlocked}
                   onClick={() => startTestRun.mutate()}
                 >
                   <RotateCcw className="mr-1.5 h-3.5 w-3.5" />
@@ -832,7 +967,7 @@ export default function KalshiPaperPanel() {
               <Button
                 className="mt-2"
                 size="sm"
-                disabled={exitPosition.isPending}
+                disabled={exitPosition.isPending || positionExitRetryBlocked}
                 onClick={() => exitPosition.mutate(undefined)}
               >
                 <RotateCcw className="mr-1.5 h-3.5 w-3.5" />
@@ -939,7 +1074,7 @@ export default function KalshiPaperPanel() {
               <Button
                 className="mt-2"
                 size="sm"
-                disabled={cancelOrder.isPending}
+                disabled={cancelOrder.isPending || cancellationRetryBlocked}
                 onClick={() => cancelOrder.mutate(undefined)}
               >
                 <RotateCcw className="mr-1.5 h-3.5 w-3.5" />

@@ -315,6 +315,28 @@ api.get = originalGet
 
 api.post = async () => ({ data: { ...decision, decision_id: 'different-decision' } })
 await assert.rejects(() => recordKalshiPaperDecision(pendingAttempt), /identity mismatch/i)
+for (const [field, value] of [
+  ['account_id', 'different-account'],
+  ['opportunity_id', 'different-opportunity'],
+  ['opportunity_revision', 'f'.repeat(64)],
+  ['action', 'pass'],
+  ['requested_quantity', '4.0'],
+  ['limit_price', '0.600001'],
+  ['time_in_force', 'good_till_canceled'],
+]) {
+  api.post = async () => ({ data: { ...decision, [field]: value } })
+  await assert.rejects(
+    () => recordKalshiPaperDecision(pendingAttempt),
+    /identity mismatch/i,
+    `shape-valid ${field} mismatch must remain ambiguous`,
+  )
+}
+api.post = async () => ({ data: decision })
+assert.equal(
+  (await recordKalshiPaperDecision(legacyPendingAttempt)).time_in_force,
+  'immediate_or_cancel',
+  'legacy omitted TIF must correlate as normalized IOC',
+)
 api.post = async () => ({ data: { ...sellDecision, position_id: 'paper-position:different' } })
 await assert.rejects(() => exitKalshiPaperPosition(positionExitInput), /identity mismatch/i)
 let capturedPost = null
@@ -370,10 +392,13 @@ assert.match(panelSource, /callisto:kalshi-paper:pending-attempt/)
 assert.match(panelSource, /callisto:kalshi-paper:pending-cancellation/)
 assert.match(panelSource, /callisto:kalshi-paper:pending-position-exit/)
 assert.match(panelSource, /callisto:kalshi-paper:pending-test-run/)
-assert.match(panelSource, /localStorage\.setItem\(PENDING_ATTEMPT_KEY, JSON\.stringify\(payload\)\)/)
-assert.match(panelSource, /return recordKalshiPaperDecision\(payload\)/)
+assert.match(panelSource, /submittedBytes = JSON\.stringify\(payload\)[\s\S]*localStorage\.setItem\(PENDING_ATTEMPT_KEY, submittedBytes\)/)
+assert.match(panelSource, /decision: await recordKalshiPaperDecision\(payload\), submittedBytes/)
+assert.match(panelSource, /removePendingIfExact\(PENDING_CANCELLATION_KEY, submittedBytes\)/)
+assert.match(panelSource, /removePendingIfExact\(PENDING_POSITION_EXIT_KEY, submittedBytes\)/)
+assert.match(panelSource, /removePendingIfExact\(PENDING_TEST_RUN_KEY, submittedBytes\)/)
 assert.match(panelSource, /Displayed cash is cached and new decisions are disabled/)
-assert.match(panelSource, /disabled=\{pendingCancellation !== null \|\| recordDecision\.isPending \|\| !lastDecision\}/)
+assert.match(panelSource, /disabled=\{recordDecision\.isPending \|\| decisionRetryBlocked\}/)
 assert.match(panelSource, /Retry same immutable decision/)
 assert.match(panelSource, /Retry same immutable cancellation/)
 assert.match(panelSource, /Retry same immutable SELL IOC/)

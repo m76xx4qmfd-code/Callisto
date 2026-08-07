@@ -15,7 +15,12 @@ from models.database import (
     KalshiPaperTestEvent,
     KalshiPaperTestRun,
 )
-from services.kalshi_paper_service import PaperOpportunityNotFound, _canonical_json, _sha256
+from services.kalshi_paper_service import (
+    KalshiPaperService,
+    PaperOpportunityNotFound,
+    _canonical_json,
+    _sha256,
+)
 from services.kalshi_paper_test_trade_service import (
     KalshiPaperTestRunConflict,
     KalshiPaperTestTradeService,
@@ -406,6 +411,157 @@ async def test_manual_close_winning_during_worker_get_completes_without_oversell
         assert completed["events"][-1]["reason"] == "position_closed_by_competing_path"
     finally:
         release_get.set()
+        await engine.dispose()
+
+
+@pytest.mark.db
+@pytest.mark.asyncio
+async def test_unresolved_manual_exit_intent_blocks_trigger_once_without_more_market_reads() -> None:
+    engine, factory, market_data, paper, service, request = await _test_service(
+        "test_trade_unresolved_manual_exit"
+    )
+    entered_quote = asyncio.Event()
+    never_release = asyncio.Event()
+
+    async def blocked_quote(_ticker: str):
+        entered_quote.set()
+        await never_release.wait()
+
+    try:
+        started = await service.start_run(**request)
+        market_data.fetch_quote.side_effect = blocked_quote
+        manual_decision_id = "manual-exit-cancelled-after-intent"
+        manual = asyncio.create_task(
+            paper.record_exit(
+                account_id=str(request["account_id"]),
+                decision_id=manual_decision_id,
+                position_id=str(started["run"]["position_id"]),
+                quantity="1.00",
+                minimum_price="0.300000",
+            )
+        )
+        await entered_quote.wait()
+        manual.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await manual
+
+        restarted_paper = KalshiPaperService(
+            session_factory=factory,
+            database_engine=engine,
+            market_data_client=market_data,
+            now=lambda: NOW,
+        )
+        restarted = KalshiPaperTestTradeService(
+            session_factory=factory,
+            database_engine=engine,
+            paper_service=restarted_paper,
+            market_data_client=market_data,
+            now=lambda: NOW,
+        )
+        market_data.fetch_quote.side_effect = None
+        market_data.fetch_quote.return_value = _quote_with_yes(("0.700000", "4.00"))
+        reads_before_trigger = market_data.fetch_quote.await_count
+
+        blocked = await restarted.tick_run(str(request["run_id"]))
+        assert blocked["run"]["status"] == "blocked"
+        assert blocked["run"]["last_error"] == f"unresolved_exit_intent:{manual_decision_id}"
+        blocked_events = [event for event in blocked["events"] if event["event_type"] == "blocked"]
+        assert len(blocked_events) == 1
+        assert blocked_events[0]["reason"] == blocked["run"]["last_error"]
+        assert market_data.fetch_quote.await_count == reads_before_trigger + 1
+
+        replay = await restarted.tick_run(str(request["run_id"]))
+        assert replay == blocked
+        assert market_data.fetch_quote.await_count == reads_before_trigger + 1
+    finally:
+        never_release.set()
+        await engine.dispose()
+
+
+@pytest.mark.db
+@pytest.mark.asyncio
+async def test_get_run_is_one_repeatable_snapshot_during_concurrent_pause() -> None:
+    engine, factory, market_data, paper, service, request = await _test_service(
+        "test_trade_get_snapshot"
+    )
+    try:
+        await service.start_run(**request)
+        writer = KalshiPaperTestTradeService(
+            session_factory=factory,
+            database_engine=engine,
+            paper_service=paper,
+            market_data_client=market_data,
+            now=lambda: NOW,
+        )
+        projection_started = asyncio.Event()
+        release_projection = asyncio.Event()
+        original_projection = service._position_projection
+
+        async def paused_projection(factory_or_session, run_id):
+            projection_started.set()
+            await release_projection.wait()
+            return await original_projection(factory_or_session, run_id)
+
+        service._position_projection = paused_projection
+        reader = asyncio.create_task(service.get_run(str(request["run_id"])))
+        await projection_started.wait()
+        await writer.pause_run(str(request["run_id"]))
+        release_projection.set()
+        snapshot = await reader
+
+        assert snapshot["run"]["status"] == "monitoring"
+        assert snapshot["run"]["next_event_sequence"] == len(snapshot["events"]) + 1
+        assert snapshot["events"][-1]["event_type"] == "entry_filled"
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.db
+@pytest.mark.asyncio
+async def test_list_runs_uses_one_repeatable_snapshot_across_every_run() -> None:
+    engine, factory, market_data, paper, service, request = await _test_service(
+        "test_trade_list_snapshot"
+    )
+    try:
+        first = await service.start_run(**request)
+        second_request = dict(request, run_id=f"{request['run_id']}-second")
+        second = await service.start_run(**second_request)
+        writer = KalshiPaperTestTradeService(
+            session_factory=factory,
+            database_engine=engine,
+            paper_service=paper,
+            market_data_client=market_data,
+            now=lambda: NOW,
+        )
+        projection_started = asyncio.Event()
+        release_projection = asyncio.Event()
+        first_projected_run: str | None = None
+        original_projection = service._position_projection
+
+        async def paused_first_projection(factory_or_session, run_id):
+            nonlocal first_projected_run
+            if first_projected_run is None:
+                first_projected_run = str(run_id)
+                projection_started.set()
+                await release_projection.wait()
+            return await original_projection(factory_or_session, run_id)
+
+        service._position_projection = paused_first_projection
+        reader = asyncio.create_task(service.list_runs(str(request["account_id"])))
+        await projection_started.wait()
+        other_run_id = (
+            str(second["run"]["run_id"])
+            if first_projected_run == first["run"]["run_id"]
+            else str(first["run"]["run_id"])
+        )
+        await writer.pause_run(other_run_id)
+        release_projection.set()
+        snapshots = await reader
+
+        assert len(snapshots) == 2
+        assert {item["run"]["status"] for item in snapshots} == {"monitoring"}
+        assert all(item["run"]["next_event_sequence"] == len(item["events"]) + 1 for item in snapshots)
+    finally:
         await engine.dispose()
 
 

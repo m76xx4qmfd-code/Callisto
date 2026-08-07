@@ -79,6 +79,16 @@ class PaperPositionNotClosable(RuntimeError):
     pass
 
 
+class PaperUnresolvedExitIntent(PaperPositionNotClosable):
+    """A different durable SELL intent must be resolved before another exit."""
+
+    def __init__(self, decision_id: str) -> None:
+        self.decision_id = decision_id
+        super().__init__(
+            f"paper position has unresolved exit intent {decision_id}; retry it first"
+        )
+
+
 class _MarketDataCapability(Protocol):
     async def fetch_quote(self, ticker: str) -> PaperQuote: ...
 
@@ -439,9 +449,7 @@ class KalshiPaperService:
                             .limit(1)
                         )
                         if unresolved_exit_id is not None:
-                            raise PaperPositionNotClosable(
-                                f"paper position has unresolved exit intent {unresolved_exit_id}; retry it first"
-                            )
+                            raise PaperUnresolvedExitIntent(str(unresolved_exit_id))
                         sold_quantity = cast(
                             Decimal,
                             await session.scalar(

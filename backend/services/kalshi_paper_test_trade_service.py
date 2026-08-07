@@ -34,6 +34,7 @@ from services.kalshi_paper_service import (
     PaperOpportunityIneligible,
     PaperOpportunityNotFound,
     PaperPositionNotClosable,
+    PaperUnresolvedExitIntent,
 )
 
 
@@ -124,6 +125,11 @@ class KalshiPaperTestTradeService:
         revision = str(opportunity_revision or "").strip().lower()
         if not normalized_run_id or not normalized_account_id or not normalized_opportunity_id:
             raise ValueError("run_id, account_id, and opportunity_id are required")
+        if not all(
+            value.isascii()
+            for value in (normalized_run_id, normalized_account_id, normalized_opportunity_id)
+        ):
+            raise ValueError("run_id, account_id, and opportunity_id must use ASCII")
         if len(revision) != 64 or any(character not in _HASH_PATTERN for character in revision):
             raise ValueError("opportunity_revision must be a SHA-256 digest")
         parsed_quantity = parse_quantity(quantity)
@@ -146,9 +152,8 @@ class KalshiPaperTestTradeService:
             "stop_loss_price": decimal_string(stop_loss, scale=6),
             "stop_loss_minimum_price": decimal_string(stop_floor, scale=6),
         }
-        request_hash = hashlib.sha256(
-            json.dumps(canonical, sort_keys=True, separators=(",", ":")).encode("utf-8")
-        ).hexdigest()
+        request_json = json.dumps(canonical, sort_keys=True, separators=(",", ":"))
+        request_hash = hashlib.sha256(request_json.encode("utf-8")).hexdigest()
 
         async with self._session_factory() as session, session.begin():
             existing = await session.get(KalshiPaperTestRun, normalized_run_id)
@@ -167,6 +172,7 @@ class KalshiPaperTestTradeService:
                 existing = KalshiPaperTestRun(
                     run_id=normalized_run_id,
                     request_hash=request_hash,
+                    request_json=request_json,
                     account_id=normalized_account_id,
                     opportunity_id=normalized_opportunity_id,
                     opportunity_revision=revision,
@@ -307,10 +313,11 @@ class KalshiPaperTestTradeService:
 
     async def get_run(self, run_id: str) -> dict[str, object]:
         async with self._session_factory() as session:
+            await session.connection(execution_options={"isolation_level": "REPEATABLE READ"})
             run = await session.get(KalshiPaperTestRun, run_id)
             if run is None:
                 raise KalshiPaperTestRunNotFound("paper test run not found")
-            remaining, realized = await self._position_projection(self._session_factory, run_id)
+            remaining, realized = await self._position_projection(session, run_id)
             events = (
                 await session.execute(
                     select(KalshiPaperTestEvent)
@@ -325,16 +332,35 @@ class KalshiPaperTestTradeService:
 
     async def list_runs(self, account_id: str) -> list[dict[str, object]]:
         async with self._session_factory() as session:
+            await session.connection(execution_options={"isolation_level": "REPEATABLE READ"})
             if await session.get(KalshiPaperAccount, account_id) is None:
                 raise KalshiPaperTestRunNotFound("paper account not found")
-            run_ids = (
+            runs = (
                 await session.execute(
-                    select(KalshiPaperTestRun.run_id)
+                    select(KalshiPaperTestRun)
                     .where(KalshiPaperTestRun.account_id == account_id)
                     .order_by(KalshiPaperTestRun.created_at.desc())
                 )
             ).scalars()
-        return [await self.get_run(run_id) for run_id in run_ids]
+            snapshots: list[dict[str, object]] = []
+            for run in runs:
+                remaining, realized = await self._position_projection(session, run.run_id)
+                events = (
+                    await session.execute(
+                        select(KalshiPaperTestEvent)
+                        .where(KalshiPaperTestEvent.run_id == run.run_id)
+                        .order_by(KalshiPaperTestEvent.sequence)
+                    )
+                ).scalars()
+                snapshots.append(
+                    {
+                        "run": self._serialize_run(
+                            run, remaining=remaining, realized_pnl=realized
+                        ),
+                        "events": [self._serialize_event(event) for event in events],
+                    }
+                )
+            return snapshots
 
     async def pause_run(self, run_id: str) -> dict[str, object]:
         return await self._control(run_id, expected="monitoring", target="paused", event_type="paused")
@@ -488,6 +514,13 @@ class KalshiPaperTestTradeService:
             }
         try:
             decision = await self._paper.record_exit(**facts)
+        except PaperUnresolvedExitIntent as exc:
+            await self._block_run(
+                factory,
+                trigger.run_id,
+                f"unresolved_exit_intent:{exc.decision_id}",
+            )
+            return
         except PaperPositionNotClosable:
             remaining, realized = await self._position_projection(factory, trigger.run_id)
             if remaining == Decimal("0"):
@@ -559,36 +592,43 @@ class KalshiPaperTestTradeService:
             run.last_reason = reason
 
     async def _position_projection(self, factory, run_id: str) -> tuple[Decimal, Decimal]:  # noqa: ANN001
+        if isinstance(factory, AsyncSession):
+            return await self._position_projection_in_session(factory, run_id)
         async with factory() as session:
-            run = await session.get(KalshiPaperTestRun, run_id)
-            if run is None or run.position_id is None:
-                return Decimal("0"), Decimal("0")
-            position = await session.get(KalshiPaperPosition, (run.account_id, run.position_id))
-            if position is None:
-                raise KalshiPaperTestRunConflict("run position evidence is missing")
-            sold = cast(
-                Decimal,
-                await session.scalar(
-                    select(func.coalesce(func.sum(KalshiPaperDecision.filled_quantity), Decimal("0"))).where(
-                        KalshiPaperDecision.account_id == run.account_id,
-                        KalshiPaperDecision.position_id == run.position_id,
-                        KalshiPaperDecision.order_side == "sell",
-                    )
-                ),
-            )
-            realized = cast(
-                Decimal,
-                await session.scalar(
-                    select(func.coalesce(func.sum(KalshiPaperDecision.realized_pnl), Decimal("0"))).where(
-                        KalshiPaperDecision.account_id == run.account_id,
-                        KalshiPaperDecision.position_id == run.position_id,
-                        KalshiPaperDecision.order_side == "sell",
-                    )
-                ),
-            )
-            entry_units = _to_scaled_int(cast(Decimal, position.entry_quantity), scale=2, field="entry_quantity")
-            sold_units = _to_scaled_int(sold, scale=2, field="sold_quantity")
-            return _from_scaled_int(entry_units - sold_units, scale=2), realized
+            return await self._position_projection_in_session(session, run_id)
+
+    async def _position_projection_in_session(
+        self, session: AsyncSession, run_id: str
+    ) -> tuple[Decimal, Decimal]:
+        run = await session.get(KalshiPaperTestRun, run_id)
+        if run is None or run.position_id is None:
+            return Decimal("0"), Decimal("0")
+        position = await session.get(KalshiPaperPosition, (run.account_id, run.position_id))
+        if position is None:
+            raise KalshiPaperTestRunConflict("run position evidence is missing")
+        sold = cast(
+            Decimal,
+            await session.scalar(
+                select(func.coalesce(func.sum(KalshiPaperDecision.filled_quantity), Decimal("0"))).where(
+                    KalshiPaperDecision.account_id == run.account_id,
+                    KalshiPaperDecision.position_id == run.position_id,
+                    KalshiPaperDecision.order_side == "sell",
+                )
+            ),
+        )
+        realized = cast(
+            Decimal,
+            await session.scalar(
+                select(func.coalesce(func.sum(KalshiPaperDecision.realized_pnl), Decimal("0"))).where(
+                    KalshiPaperDecision.account_id == run.account_id,
+                    KalshiPaperDecision.position_id == run.position_id,
+                    KalshiPaperDecision.order_side == "sell",
+                )
+            ),
+        )
+        entry_units = _to_scaled_int(cast(Decimal, position.entry_quantity), scale=2, field="entry_quantity")
+        sold_units = _to_scaled_int(sold, scale=2, field="sold_quantity")
+        return _from_scaled_int(entry_units - sold_units, scale=2), realized
 
     async def _control(self, run_id: str, *, expected: str, target: str, event_type: str) -> dict[str, object]:
         normalized = str(run_id or "").strip()
