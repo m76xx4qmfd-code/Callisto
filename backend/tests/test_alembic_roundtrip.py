@@ -397,6 +397,7 @@ async def test_head_migration_from_previous_revision_creates_paper_schema() -> N
                 "trg_kalshi_paper_cancellations_validate_lifecycle",
                 "trg_kalshi_paper_order_events_validate_lifecycle",
                 "trg_kalshi_paper_test_runs_protect_request",
+                "trg_kalshi_paper_test_runs_validate_projection",
                 "trg_kalshi_paper_test_events_immutable",
                 "trg_kalshi_paper_test_events_truncate_immutable",
                 "trg_kalshi_paper_test_events_validate",

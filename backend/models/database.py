@@ -4803,6 +4803,75 @@ def _register_paper_test_trade_validation(run_table, event_table) -> None:  # no
         ),
     )
     _sa_event.listen(
+        run_table,
+        "after_create",
+        DDL(
+            """
+            CREATE OR REPLACE FUNCTION validate_kalshi_paper_test_run_projection()
+            RETURNS trigger AS $$
+            DECLARE appended_count bigint; latest_event_type text;
+            BEGIN
+                IF NEW.position_id IS NOT NULL AND NOT EXISTS (
+                    SELECT 1 FROM kalshi_paper_positions p
+                     WHERE p.account_id=NEW.account_id AND p.position_id=NEW.position_id
+                       AND p.entry_decision_id=NEW.entry_decision_id
+                       AND p.ticker=NEW.ticker AND p.outcome=NEW.outcome
+                ) THEN
+                    RAISE EXCEPTION 'Kalshi paper test run position causality is invalid';
+                END IF;
+                IF NEW.status IS DISTINCT FROM OLD.status AND NOT (
+                    (OLD.status='starting' AND NEW.status IN ('monitoring','entry_unfilled','blocked')) OR
+                    (OLD.status='monitoring' AND NEW.status IN ('paused','stopped','completed','blocked')) OR
+                    (OLD.status='paused' AND NEW.status IN ('monitoring','stopped','blocked'))
+                ) THEN
+                    RAISE EXCEPTION 'Kalshi paper test run status transition is invalid';
+                END IF;
+                IF NEW.next_event_sequence < OLD.next_event_sequence THEN
+                    RAISE EXCEPTION 'Kalshi paper test run event sequence cannot regress';
+                END IF;
+                IF NEW.next_event_sequence = OLD.next_event_sequence THEN
+                    IF NEW.position_id IS DISTINCT FROM OLD.position_id OR NEW.status IS DISTINCT FROM OLD.status
+                       OR NEW.last_reason IS DISTINCT FROM OLD.last_reason
+                       OR NEW.last_error IS DISTINCT FROM OLD.last_error THEN
+                        RAISE EXCEPTION 'Kalshi paper test run projection changed without lifecycle event';
+                    END IF;
+                ELSE
+                    SELECT count(*), max(event_type) FILTER (WHERE sequence=NEW.next_event_sequence-1)
+                      INTO appended_count, latest_event_type
+                      FROM kalshi_paper_test_events
+                     WHERE run_id=NEW.run_id AND sequence>=OLD.next_event_sequence
+                       AND sequence<NEW.next_event_sequence;
+                    IF appended_count IS DISTINCT FROM NEW.next_event_sequence-OLD.next_event_sequence
+                       OR latest_event_type IS NULL THEN
+                        RAISE EXCEPTION 'Kalshi paper test run projection lacks contiguous lifecycle events';
+                    END IF;
+                    IF NEW.status IS DISTINCT FROM OLD.status AND NOT (
+                        (NEW.status='monitoring' AND latest_event_type IN ('entry_filled','resumed')) OR
+                        (NEW.status='entry_unfilled' AND latest_event_type='entry_unfilled') OR
+                        (NEW.status='paused' AND latest_event_type='paused') OR
+                        (NEW.status='stopped' AND latest_event_type='stopped') OR
+                        (NEW.status='completed' AND latest_event_type='completed') OR
+                        (NEW.status='blocked' AND latest_event_type='blocked')
+                    ) THEN
+                        RAISE EXCEPTION 'Kalshi paper test run status lacks matching lifecycle event';
+                    END IF;
+                END IF;
+                RETURN NEW;
+            END;
+            $$ LANGUAGE plpgsql
+            """
+        ),
+    )
+    _sa_event.listen(
+        run_table,
+        "after_create",
+        DDL(
+            "CREATE CONSTRAINT TRIGGER trg_kalshi_paper_test_runs_validate_projection "
+            "AFTER UPDATE ON kalshi_paper_test_runs DEFERRABLE INITIALLY DEFERRED "
+            "FOR EACH ROW EXECUTE FUNCTION validate_kalshi_paper_test_run_projection()"
+        ),
+    )
+    _sa_event.listen(
         event_table,
         "after_create",
         DDL(
@@ -4812,6 +4881,8 @@ def _register_paper_test_trade_validation(run_table, event_table) -> None:  # no
             DECLARE controlled kalshi_paper_test_runs%%ROWTYPE;
                     decided kalshi_paper_decisions%%ROWTYPE;
                     observed_best numeric;
+                    authoritative_remaining numeric;
+                    authoritative_pnl numeric;
             BEGIN
                 SELECT * INTO controlled FROM kalshi_paper_test_runs WHERE run_id = NEW.run_id;
                 IF NOT FOUND OR NEW.account_id IS DISTINCT FROM controlled.account_id
@@ -4826,6 +4897,12 @@ def _register_paper_test_trade_validation(run_table, event_table) -> None:  # no
                        encode(sha256(convert_to(NEW.quote_evidence_json, 'UTF8')), 'hex')
                            IS DISTINCT FROM NEW.quote_evidence_hash) THEN
                     RAISE EXCEPTION 'Kalshi paper test event quote hash is invalid';
+                END IF;
+                IF NEW.quote_evidence_json IS NOT NULL AND (
+                   NEW.quote_evidence_json ~ '[[:space:]]'
+                   OR NEW.quote_evidence_json !~ '^[{]"no_dollars":.*,"observed_at":"[^"]+","source_origin":"[^"]+","ticker":"[^"]+","yes_dollars":.*[}]$'
+                ) THEN
+                    RAISE EXCEPTION 'Kalshi paper test event quote evidence is not canonical';
                 END IF;
                 IF NEW.quote_evidence_json IS NOT NULL
                    AND NEW.quote_evidence_json::jsonb->>'ticker' IS DISTINCT FROM controlled.ticker THEN
@@ -4875,8 +4952,7 @@ def _register_paper_test_trade_validation(run_table, event_table) -> None:  # no
                         RAISE EXCEPTION 'Kalshi paper test observation event shape is invalid';
                     END IF;
                 END IF;
-                IF NEW.event_type IN ('exit_filled','exit_partial','exit_no_fill')
-                   AND NEW.reason IS DISTINCT FROM 'position_changed_before_exit' THEN
+                IF NEW.event_type IN ('exit_filled','exit_partial','exit_no_fill') THEN
                     IF NOT EXISTS (
                         SELECT 1 FROM kalshi_paper_test_events trigger_event
                          WHERE trigger_event.run_id = NEW.run_id
@@ -4885,13 +4961,32 @@ def _register_paper_test_trade_validation(run_table, event_table) -> None:  # no
                     ) THEN
                         RAISE EXCEPTION 'Kalshi paper test exit event has no trigger evidence';
                     END IF;
-                    SELECT * INTO decided FROM kalshi_paper_decisions
-                     WHERE account_id = NEW.account_id AND decision_id = NEW.exit_decision_id;
-                    IF NOT FOUND OR decided.order_side IS DISTINCT FROM 'sell'
-                       OR decided.position_id IS DISTINCT FROM controlled.position_id
-                       OR decided.ticker IS DISTINCT FROM controlled.ticker
-                       OR decided.outcome IS DISTINCT FROM controlled.outcome THEN
-                        RAISE EXCEPTION 'Kalshi paper test exit event contradicts decision causality';
+                    IF NEW.reason='position_changed_before_exit' THEN
+                        IF NEW.event_type IS DISTINCT FROM 'exit_no_fill' THEN
+                            RAISE EXCEPTION 'Kalshi paper test exceptional exit event shape is invalid';
+                        END IF;
+                    ELSE
+                        SELECT * INTO decided FROM kalshi_paper_decisions
+                         WHERE account_id = NEW.account_id AND decision_id = NEW.exit_decision_id;
+                        IF NOT FOUND OR decided.order_side IS DISTINCT FROM 'sell'
+                           OR decided.position_id IS DISTINCT FROM controlled.position_id
+                           OR decided.ticker IS DISTINCT FROM controlled.ticker
+                           OR decided.outcome IS DISTINCT FROM controlled.outcome THEN
+                            RAISE EXCEPTION 'Kalshi paper test exit event contradicts decision causality';
+                        END IF;
+                    END IF;
+                    SELECT p.entry_quantity-COALESCE(sum(d.filled_quantity) FILTER (WHERE d.order_side='sell'),0),
+                           COALESCE(sum(d.realized_pnl) FILTER (WHERE d.order_side='sell'),0)
+                      INTO authoritative_remaining, authoritative_pnl
+                      FROM kalshi_paper_positions p
+                      LEFT JOIN kalshi_paper_decisions d
+                        ON d.account_id=p.account_id AND d.position_id=p.position_id
+                     WHERE p.account_id=controlled.account_id AND p.position_id=controlled.position_id
+                     GROUP BY p.entry_quantity;
+                    IF NEW.position_id IS DISTINCT FROM controlled.position_id
+                       OR NEW.remaining_quantity IS DISTINCT FROM authoritative_remaining
+                       OR NEW.realized_pnl IS DISTINCT FROM authoritative_pnl THEN
+                        RAISE EXCEPTION 'Kalshi paper test exit event contradicts authoritative position projection';
                     END IF;
                 END IF;
                 IF NEW.event_type = 'entry_filled' AND NOT EXISTS (
