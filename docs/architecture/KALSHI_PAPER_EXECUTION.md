@@ -1,10 +1,10 @@
 # Kalshi-Native Paper Execution
 
-Status: implemented, paper-only, operator-driven, default off
+Status: implemented, paper-only, operator-authorized, worker default-idle
 
 ## Boundary
 
-The paper executor is a separate local financial ledger. It cannot initialize a Kalshi account, sign a request, submit/cancel/amend a venue order, or write to the existing live venue execution ledger. It exposes no worker and runs only when an operator explicitly records a decision through the Accounts → Kalshi Paper desk or its API.
+The paper executor is a separate local financial ledger. It cannot initialize a Kalshi account, sign a request, submit/cancel/amend a venue order, or write to the existing live venue execution ledger. Manual decisions run only when an operator acts through the Accounts → Kalshi Paper desk or its API. The dedicated Test Trades worker may remain process-running, but it performs market reads or paper-ledger actions only for a persisted run that the operator explicitly started; with no eligible run it remains idle.
 
 The only remote capability is unauthenticated `GET` access to the approved production market-data origin:
 
@@ -73,6 +73,18 @@ Entry cost is BUY notional plus BUY fee. For entry quantity `Q`, entry cost `C`,
 
 The position API and UI preserve all financial values as canonical decimal strings and are explicitly labeled `PAPER ONLY`. Before a manual SELL leaves the browser, account, position, decision ID, quantity, and minimum price are persisted as one immutable retry identity. An ambiguous response freezes account switching and other paper mutations until an exactly correlated response resolves the attempt.
 
+## Test Trades lifecycle
+
+A Test Trade is an explicitly operator-started, paper-only IOC entry plus a persisted monitor for that fill-derived position. The immutable run request fixes the account, opportunity revision, quantity, entry limit, absolute take-profit bid, absolute stop-loss bid, and stop-loss SELL floor. The service commits the run and `started` event before the entry market read. Entry uses deterministic decision ID `paper-test-entry:{run_id}` through the same exact BUY ledger; an identical run replay returns the existing evidence, while changed request facts conflict.
+
+A positive entry fill binds the run to the one immutable position lot created by that entry decision and freezes its ticker and outcome. A no-fill entry is terminal. The dedicated worker recovers both `starting` and `monitoring` runs after restart. Recovery replays only the stable entry or exit identity; it never evaluates a newer book under a new identity and cannot create a second fill after response loss.
+
+For a monitoring run, the worker reads a fresh public order book and compares the held outcome's highest realizable bid with the exact thresholds. A bid at or above the take-profit price creates immutable trigger evidence and a SELL IOC whose minimum is the take-profit price. A bid at or below the stop-loss price creates immutable trigger evidence and a SELL IOC whose minimum is the separately supplied stop-loss floor. Every trigger stores the source timestamps, canonical book JSON, evidence hash, best bid, position quantity observed, and deterministic exit ID `paper-test-exit:{run_id}:{trigger_sequence}` before calling the existing SELL service.
+
+The SELL ledger remains authoritative under its decision and position locks. If a manual close changes the position after the trigger observation, stale quantity is rejected before any cash credit and the run reconciles the actual remaining lot. Partial or no-fill exits return the run to monitoring; a later qualifying observation gets a new immutable exit identity. Exactly zero remaining quantity completes the run. Pause and resume append lifecycle evidence. Stop appends evidence and disables monitoring without selling or settling the residual position. Settlement remains a separate accounting capability and is never represented as SELL.
+
+The browser labels this surface `TEST TRADES — PAPER ONLY`. It persists the complete start payload under `callisto:kalshi-paper:pending-test-run` before sending it, freezes paper-account changes while the result is ambiguous, and clears the payload only after exact response identity correlation.
+
 ## Local cancellation lifecycle
 
 `kalshi_paper_orders` stores immutable GTC opening facts. `kalshi_paper_order_events` and `kalshi_paper_cancellations` are append-only lifecycle evidence; current cancelability is derived from those rows rather than a mutable order projection. A full local cancellation performs no Kalshi request. One transaction locks the paper account and target order, appends the unique cancellation result and terminal event, and releases the order's persisted reservation exactly once.
@@ -85,4 +97,4 @@ PostgreSQL enforces finite fixed-point scale and sign checks without model-added
 
 ## Explicitly not included
 
-This capability is not a live-readiness claim. It does not include venue writes, demo authentication, fee-bearing markets, paper GTC decreases or amendments, post-placement fills, settlement accounting, stop-loss/take-profit controllers, autonomous paper workers, approved risk policy, session-bound live arming, server-side venue-write leases, or live execution readiness.
+This capability is not a live-readiness claim. It does not include venue writes, demo authentication, fee-bearing markets, paper GTC decreases or amendments, post-placement GTC fills, settlement accounting, approved risk policy, session-bound live arming, server-side venue-write leases, or live execution readiness. The Test Trades worker controls only explicitly started paper runs; it is not an autonomous venue trader.

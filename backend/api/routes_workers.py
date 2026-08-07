@@ -55,6 +55,7 @@ ALLOWED_WORKERS = {
     "discovery",
     "events",
     "kalshi_portfolio_sync",
+    "kalshi_paper_test_trades",
 }
 WORKER_DISPLAY_ORDER = (
     "scanner",
@@ -69,8 +70,12 @@ WORKER_DISPLAY_ORDER = (
     "redeemer",
     "events",
     "kalshi_portfolio_sync",
+    "kalshi_paper_test_trades",
 )
-GENERIC_WORKERS = ("scanner_slo", "crypto", "tracked_traders", "trader_reconciliation", "redeemer", "events", "kalshi_portfolio_sync")
+GENERIC_WORKERS = (
+    "scanner_slo", "crypto", "tracked_traders", "trader_reconciliation",
+    "redeemer", "events", "kalshi_portfolio_sync", "kalshi_paper_test_trades",
+)
 DB_RETRY_ATTEMPTS = 3
 DB_RETRY_BASE_DELAY_SECONDS = 0.2
 DB_RETRY_MAX_DELAY_SECONDS = 1.5

@@ -148,6 +148,92 @@ export interface KalshiPaperPositionExitInput {
   minimum_price: string
 }
 
+export type KalshiPaperTestRunStatus =
+  | 'starting'
+  | 'monitoring'
+  | 'paused'
+  | 'entry_unfilled'
+  | 'stopped'
+  | 'completed'
+  | 'blocked'
+
+export type KalshiPaperTestEventType =
+  | 'started'
+  | 'entry_filled'
+  | 'entry_unfilled'
+  | 'no_bid'
+  | 'hold'
+  | 'take_profit_triggered'
+  | 'stop_loss_triggered'
+  | 'exit_filled'
+  | 'exit_partial'
+  | 'exit_no_fill'
+  | 'paused'
+  | 'resumed'
+  | 'stopped'
+  | 'completed'
+  | 'blocked'
+
+export interface KalshiPaperTestRunInput {
+  run_id: string
+  account_id: string
+  opportunity_id: string
+  opportunity_revision: string
+  quantity: string
+  entry_limit_price: string
+  take_profit_price: string
+  stop_loss_price: string
+  stop_loss_minimum_price: string
+}
+
+export interface KalshiPaperTestEvent {
+  run_id: string
+  account_id: string
+  sequence: number
+  event_type: KalshiPaperTestEventType
+  position_id: string | null
+  best_bid: string | null
+  trigger_price: string | null
+  exit_decision_id: string | null
+  market_observed_at: string | null
+  book_observed_at: string | null
+  quote_evidence_hash: string | null
+  quote_evidence_json: string | null
+  remaining_quantity: string | null
+  realized_pnl: string | null
+  reason: string | null
+  created_at: string
+}
+
+export interface KalshiPaperTestRun extends KalshiPaperTestRunInput {
+  ticker: string
+  outcome: 'yes' | 'no'
+  entry_decision_id: string
+  position_id: string | null
+  status: KalshiPaperTestRunStatus
+  next_event_sequence: number
+  remaining_quantity: string
+  realized_pnl: string
+  last_error: string | null
+  last_reason: string | null
+  created_at: string
+  updated_at: string
+}
+
+export interface KalshiPaperTestRunDetail {
+  run: KalshiPaperTestRun
+  events: KalshiPaperTestEvent[]
+}
+
+const TEST_RUN_STATUSES = [
+  'starting', 'monitoring', 'paused', 'entry_unfilled', 'stopped', 'completed', 'blocked',
+] as const
+const TEST_EVENT_TYPES = [
+  'started', 'entry_filled', 'entry_unfilled', 'no_bid', 'hold', 'take_profit_triggered',
+  'stop_loss_triggered', 'exit_filled', 'exit_partial', 'exit_no_fill', 'paused', 'resumed',
+  'stopped', 'completed', 'blocked',
+] as const
+
 const DECIMAL_PATTERN = /^(?:0|[1-9]\d*)(?:\.\d+)?$/
 const SIGNED_DECIMAL_PATTERN = /^-?(?:0|[1-9]\d*)(?:\.\d+)?$/
 const SHA256_PATTERN = /^[0-9a-f]{64}$/
@@ -531,6 +617,144 @@ export function requireKalshiPaperPositionExitInput(value: unknown): KalshiPaper
   return input as unknown as KalshiPaperPositionExitInput
 }
 
+export function requireKalshiPaperTestRunInput(value: unknown): KalshiPaperTestRunInput {
+  const input = requireObject(value, 'pending_test_run')
+  rejectUnknownFields(input, [
+    'run_id', 'account_id', 'opportunity_id', 'opportunity_revision', 'quantity',
+    'entry_limit_price', 'take_profit_price', 'stop_loss_price', 'stop_loss_minimum_price',
+  ], 'pending_test_run')
+  requireTextValue(input, 'run_id', 'pending_test_run')
+  requireTextValue(input, 'account_id', 'pending_test_run')
+  requireTextValue(input, 'opportunity_id', 'pending_test_run')
+  requireSha256(input, 'opportunity_revision', 'pending_test_run')
+  const quantity = requireDecimalText(input, 'quantity', 'pending_test_run')
+  if (!/^(?:0|[1-9]\d*)\.\d{2}$/.test(quantity) || quantity === '0.00') {
+    throw new Error('pending_test_run.quantity must be positive and use exact quantity scale')
+  }
+  const priceKeys = [
+    'entry_limit_price', 'take_profit_price', 'stop_loss_price', 'stop_loss_minimum_price',
+  ] as const
+  const prices = priceKeys.map((key) => {
+    const price = requireDecimalText(input, key, 'pending_test_run')
+    if (!/^0\.\d{6}$/.test(price) || price === '0.000000') {
+      throw new Error(`pending_test_run.${key} must be between zero and one and use exact price scale`)
+    }
+    return price
+  })
+  const [, takeProfit, stopLoss, stopLossMinimum] = prices
+  if (!(stopLossMinimum <= stopLoss && stopLoss < takeProfit)) {
+    throw new Error('pending_test_run price threshold ordering is invalid')
+  }
+  return input as unknown as KalshiPaperTestRunInput
+}
+
+export function requireKalshiPaperTestEvent(value: unknown): KalshiPaperTestEvent {
+  const event = requireObject(value, 'test_event')
+  rejectUnknownFields(event, [
+    'run_id', 'account_id', 'sequence', 'event_type', 'position_id', 'best_bid', 'trigger_price',
+    'exit_decision_id', 'market_observed_at', 'book_observed_at', 'quote_evidence_hash',
+    'quote_evidence_json', 'remaining_quantity', 'realized_pnl', 'reason', 'created_at',
+  ], 'test_event')
+  requireTextValue(event, 'run_id', 'test_event')
+  requireTextValue(event, 'account_id', 'test_event')
+  const sequence = requireInteger(event, 'sequence', 'test_event')
+  if (sequence < 1) throw new Error('Kalshi paper test event sequence must be positive')
+  requireEnum(event, 'event_type', TEST_EVENT_TYPES, 'test_event')
+  requireNullableTextValue(event, 'position_id', 'test_event')
+  const bestBid = requireNullableDecimalText(event, 'best_bid', 'test_event')
+  const triggerPrice = requireNullableDecimalText(event, 'trigger_price', 'test_event')
+  if (bestBid !== null && (!/^0\.\d{6}$/.test(bestBid) || bestBid === '0.000000')) {
+    throw new Error('test_event.best_bid must use exact nonzero price scale')
+  }
+  if (triggerPrice !== null && (!/^0\.\d{6}$/.test(triggerPrice) || triggerPrice === '0.000000')) {
+    throw new Error('test_event.trigger_price must use exact nonzero price scale')
+  }
+  requireNullableTextValue(event, 'exit_decision_id', 'test_event')
+  requireNullableTextValue(event, 'market_observed_at', 'test_event')
+  requireNullableTextValue(event, 'book_observed_at', 'test_event')
+  requireNullableSha256(event, 'quote_evidence_hash', 'test_event')
+  requireNullableTextValue(event, 'quote_evidence_json', 'test_event')
+  const remaining = requireNullableDecimalText(event, 'remaining_quantity', 'test_event')
+  if (remaining !== null && !/^(?:0|[1-9]\d*)\.\d{2}$/.test(remaining)) {
+    throw new Error('test_event.remaining_quantity must use exact quantity scale')
+  }
+  const realizedPnl = requireNullableSignedDecimalText(event, 'realized_pnl', 'test_event')
+  if (realizedPnl !== null && !/^-?(?:0|[1-9]\d*)\.\d{18}$/.test(realizedPnl)) {
+    throw new Error('test_event.realized_pnl must use exact money scale')
+  }
+  requireNullableTextValue(event, 'reason', 'test_event')
+  requireTextValue(event, 'created_at', 'test_event')
+  return event as unknown as KalshiPaperTestEvent
+}
+
+export function requireKalshiPaperTestRun(value: unknown): KalshiPaperTestRun {
+  const run = requireObject(value, 'test_run')
+  rejectUnknownFields(run, [
+    'run_id', 'account_id', 'opportunity_id', 'opportunity_revision', 'quantity',
+    'entry_limit_price', 'take_profit_price', 'stop_loss_price', 'stop_loss_minimum_price',
+    'ticker', 'outcome', 'entry_decision_id', 'position_id', 'status', 'next_event_sequence',
+    'remaining_quantity', 'realized_pnl', 'last_error', 'last_reason', 'created_at', 'updated_at',
+  ], 'test_run')
+  const immutable = requireKalshiPaperTestRunInput({
+    run_id: run.run_id,
+    account_id: run.account_id,
+    opportunity_id: run.opportunity_id,
+    opportunity_revision: run.opportunity_revision,
+    quantity: run.quantity,
+    entry_limit_price: run.entry_limit_price,
+    take_profit_price: run.take_profit_price,
+    stop_loss_price: run.stop_loss_price,
+    stop_loss_minimum_price: run.stop_loss_minimum_price,
+  })
+  requireTextValue(run, 'ticker', 'test_run')
+  requireEnum(run, 'outcome', ['yes', 'no'] as const, 'test_run')
+  const entryDecisionId = requireTextValue(run, 'entry_decision_id', 'test_run')
+  if (entryDecisionId !== `paper-test-entry:${immutable.run_id}`) {
+    throw new Error('Kalshi paper test run entry identity mismatch')
+  }
+  requireNullableTextValue(run, 'position_id', 'test_run')
+  requireEnum(run, 'status', TEST_RUN_STATUSES, 'test_run')
+  const nextSequence = requireInteger(run, 'next_event_sequence', 'test_run')
+  if (nextSequence < 1) throw new Error('Kalshi paper test run next sequence must be positive')
+  const remaining = requireDecimalText(run, 'remaining_quantity', 'test_run')
+  if (!/^(?:0|[1-9]\d*)\.\d{2}$/.test(remaining)) {
+    throw new Error('test_run.remaining_quantity must use exact quantity scale')
+  }
+  const realizedPnl = requireSignedDecimalText(run, 'realized_pnl', 'test_run')
+  if (!/^-?(?:0|[1-9]\d*)\.\d{18}$/.test(realizedPnl)) {
+    throw new Error('test_run.realized_pnl must use exact money scale')
+  }
+  requireNullableTextValue(run, 'last_error', 'test_run')
+  requireNullableTextValue(run, 'last_reason', 'test_run')
+  requireTextValue(run, 'created_at', 'test_run')
+  requireTextValue(run, 'updated_at', 'test_run')
+  return run as unknown as KalshiPaperTestRun
+}
+
+export function requireKalshiPaperTestRunDetail(value: unknown): KalshiPaperTestRunDetail {
+  const detail = requireObject(value, 'test_run_detail')
+  rejectUnknownFields(detail, ['run', 'events'], 'test_run_detail')
+  const run = requireKalshiPaperTestRun(detail.run)
+  if (!Array.isArray(detail.events)) throw new Error('Invalid Kalshi paper test run events payload')
+  const events = detail.events.map(requireKalshiPaperTestEvent)
+  if (events.length === 0 || events[0].sequence !== 1) {
+    throw new Error('Kalshi paper test run evidence must begin at sequence 1')
+  }
+  if (events.some((event) => event.run_id !== run.run_id || event.account_id !== run.account_id)) {
+    throw new Error('Kalshi paper test event identity mismatch')
+  }
+  if (events.some((event, index) => index > 0 && event.sequence !== events[index - 1].sequence + 1)) {
+    throw new Error('Kalshi paper test events are not contiguous')
+  }
+  if (events.some((event) => event.sequence >= run.next_event_sequence)) {
+    throw new Error('Kalshi paper test event sequence exceeds run projection')
+  }
+  if (events[events.length - 1].sequence !== run.next_event_sequence - 1) {
+    throw new Error('Kalshi paper test events do not reach the run projection')
+  }
+  return { run, events }
+}
+
 export async function createKalshiPaperAccount(input: {
   name: string
   starting_cash: string
@@ -570,12 +794,20 @@ export async function getKalshiPaperDecisions(
 export async function recordKalshiPaperDecision(input: KalshiPaperDecisionInput): Promise<KalshiPaperDecision> {
   const { data } = await api.post('/kalshi/paper/decisions', input)
   const decision = requireKalshiPaperDecision(unwrapApiData(data))
+  const expectedQuantity = input.action === 'execute' ? input.quantity : null
+  const expectedLimitPrice = input.action === 'execute' ? input.limit_price : null
+  const expectedTimeInForce = input.action === 'execute'
+    ? (input.time_in_force ?? 'immediate_or_cancel')
+    : null
   if (
     decision.account_id !== input.account_id
     || decision.decision_id !== input.decision_id
     || decision.opportunity_id !== input.opportunity_id
     || decision.opportunity_revision !== input.opportunity_revision
     || decision.action !== input.action
+    || decision.requested_quantity !== expectedQuantity
+    || decision.limit_price !== expectedLimitPrice
+    || decision.time_in_force !== expectedTimeInForce
   ) {
     throw new Error('Kalshi paper decision response identity mismatch')
   }
@@ -644,4 +876,72 @@ export async function exitKalshiPaperPosition(input: KalshiPaperPositionExitInpu
     throw new Error('Kalshi paper position exit response identity mismatch')
   }
   return decision
+}
+
+function correlateKalshiPaperTestRun(
+  detail: KalshiPaperTestRunDetail,
+  input: KalshiPaperTestRunInput,
+): KalshiPaperTestRunDetail {
+  const { run } = detail
+  if (
+    run.run_id !== input.run_id
+    || run.account_id !== input.account_id
+    || run.opportunity_id !== input.opportunity_id
+    || run.opportunity_revision !== input.opportunity_revision
+    || run.quantity !== input.quantity
+    || run.entry_limit_price !== input.entry_limit_price
+    || run.take_profit_price !== input.take_profit_price
+    || run.stop_loss_price !== input.stop_loss_price
+    || run.stop_loss_minimum_price !== input.stop_loss_minimum_price
+    || run.entry_decision_id !== `paper-test-entry:${input.run_id}`
+  ) {
+    throw new Error('Kalshi paper test run response identity mismatch')
+  }
+  return detail
+}
+
+export async function startKalshiPaperTestRun(input: KalshiPaperTestRunInput): Promise<KalshiPaperTestRunDetail> {
+  const payload = requireKalshiPaperTestRunInput(input)
+  const { data } = await api.post('/kalshi/paper/test-runs', payload)
+  return correlateKalshiPaperTestRun(requireKalshiPaperTestRunDetail(unwrapApiData(data)), payload)
+}
+
+export async function getKalshiPaperTestRuns(accountId: string): Promise<KalshiPaperTestRunDetail[]> {
+  const { data } = await api.get(`/kalshi/paper/accounts/${encodeURIComponent(accountId)}/test-runs`)
+  const payload = unwrapApiData(data)
+  if (!Array.isArray(payload)) throw new Error('Invalid Kalshi paper test runs payload')
+  const details = payload.map(requireKalshiPaperTestRunDetail)
+  if (details.some(({ run }) => run.account_id !== accountId)) {
+    throw new Error('Kalshi paper test run account identity mismatch')
+  }
+  return details
+}
+
+export async function getKalshiPaperTestRun(runId: string): Promise<KalshiPaperTestRunDetail> {
+  const { data } = await api.get(`/kalshi/paper/test-runs/${encodeURIComponent(runId)}`)
+  const detail = requireKalshiPaperTestRunDetail(unwrapApiData(data))
+  if (detail.run.run_id !== runId) throw new Error('Kalshi paper test run identity mismatch')
+  return detail
+}
+
+async function controlKalshiPaperTestRun(
+  runId: string,
+  action: 'pause' | 'resume' | 'stop',
+): Promise<KalshiPaperTestRunDetail> {
+  const { data } = await api.post(`/kalshi/paper/test-runs/${encodeURIComponent(runId)}/${action}`)
+  const detail = requireKalshiPaperTestRunDetail(unwrapApiData(data))
+  if (detail.run.run_id !== runId) throw new Error('Kalshi paper test run control identity mismatch')
+  return detail
+}
+
+export function pauseKalshiPaperTestRun(runId: string): Promise<KalshiPaperTestRunDetail> {
+  return controlKalshiPaperTestRun(runId, 'pause')
+}
+
+export function resumeKalshiPaperTestRun(runId: string): Promise<KalshiPaperTestRunDetail> {
+  return controlKalshiPaperTestRun(runId, 'resume')
+}
+
+export function stopKalshiPaperTestRun(runId: string): Promise<KalshiPaperTestRunDetail> {
+  return controlKalshiPaperTestRun(runId, 'stop')
 }

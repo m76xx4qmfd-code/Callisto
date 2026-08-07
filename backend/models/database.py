@@ -3557,7 +3557,154 @@ class KalshiPaperOrderEvent(Base):
     )
 
 
-# ==================== VENUE-NEUTRAL EXECUTION LEDGER ====================
+class KalshiPaperTestRun(Base):
+    __tablename__ = "kalshi_paper_test_runs"
+
+    run_id = Column(String, primary_key=True)
+    request_hash = Column(String(64), nullable=False)
+    request_json = Column(Text, nullable=False)
+    account_id = Column(String, ForeignKey("kalshi_paper_accounts.id", ondelete="RESTRICT"), nullable=False)
+    opportunity_id = Column(String, nullable=False)
+    opportunity_revision = Column(String(64), nullable=False)
+    ticker = Column(String, nullable=False)
+    outcome = Column(String, nullable=False)
+    quantity = Column(Numeric(asdecimal=True), nullable=False)
+    entry_limit_price = Column(Numeric(asdecimal=True), nullable=False)
+    take_profit_price = Column(Numeric(asdecimal=True), nullable=False)
+    stop_loss_price = Column(Numeric(asdecimal=True), nullable=False)
+    stop_loss_minimum_price = Column(Numeric(asdecimal=True), nullable=False)
+    entry_decision_id = Column(String, nullable=False)
+    position_id = Column(String, nullable=True)
+    status = Column(String, nullable=False)
+    next_event_sequence = Column(BigInteger, nullable=False, default=1, server_default="1")
+    last_reason = Column(String, nullable=True)
+    last_error = Column(String, nullable=True)
+    created_at = Column(DateTime, default=_utcnow, nullable=False)
+    updated_at = Column(DateTime, default=_utcnow, nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint("account_id", "entry_decision_id", name="uq_kalshi_paper_test_runs_entry"),
+
+        ForeignKeyConstraint(
+            ["account_id", "position_id"],
+            ["kalshi_paper_positions.account_id", "kalshi_paper_positions.position_id"],
+            ondelete="RESTRICT",
+            name="fk_kalshi_paper_test_runs_position",
+        ),
+        CheckConstraint("length(btrim(run_id)) > 0", name="ck_kalshi_paper_test_runs_id"),
+        CheckConstraint("request_hash ~ '^[0-9a-f]{64}$'", name="ck_kalshi_paper_test_runs_hash"),
+        CheckConstraint("opportunity_revision ~ '^[0-9a-f]{64}$'", name="ck_kalshi_paper_test_runs_revision"),
+        CheckConstraint("entry_decision_id = 'paper-test-entry:' || run_id", name="ck_kalshi_paper_test_runs_entry_id"),
+        CheckConstraint("outcome IN ('yes', 'no')", name="ck_kalshi_paper_test_runs_outcome"),
+        CheckConstraint(
+            "quantity <> 'NaN'::numeric AND quantity < 'Infinity'::numeric "
+            "AND quantity > 0 AND scale(quantity) <= 2",
+            name="ck_kalshi_paper_test_runs_quantity",
+        ),
+        CheckConstraint(
+            "entry_limit_price <> 'NaN'::numeric AND entry_limit_price > 0 AND entry_limit_price < 1 "
+            "AND scale(entry_limit_price) <= 6 AND take_profit_price <> 'NaN'::numeric "
+            "AND take_profit_price > 0 AND take_profit_price < 1 AND scale(take_profit_price) <= 6 "
+            "AND stop_loss_price <> 'NaN'::numeric AND stop_loss_price > 0 AND stop_loss_price < 1 "
+            "AND scale(stop_loss_price) <= 6 AND stop_loss_minimum_price <> 'NaN'::numeric "
+            "AND stop_loss_minimum_price > 0 AND stop_loss_minimum_price < 1 "
+            "AND scale(stop_loss_minimum_price) <= 6",
+            name="ck_kalshi_paper_test_runs_prices",
+        ),
+        CheckConstraint(
+            "stop_loss_minimum_price <= stop_loss_price "
+            "AND stop_loss_price < entry_limit_price "
+            "AND entry_limit_price < take_profit_price",
+            name="ck_kalshi_paper_test_runs_thresholds",
+        ),
+        CheckConstraint(
+            "status IN ('starting','monitoring','paused','entry_unfilled','stopped','completed','blocked')",
+            name="ck_kalshi_paper_test_runs_status",
+        ),
+        CheckConstraint(
+            "(status IN ('monitoring','paused','stopped','completed') AND position_id IS NOT NULL) OR "
+            "(status IN ('starting','entry_unfilled','blocked'))",
+            name="ck_kalshi_paper_test_runs_position_status",
+        ),
+        CheckConstraint("next_event_sequence > 0", name="ck_kalshi_paper_test_runs_sequence"),
+        Index("idx_kalshi_paper_test_runs_account_created", "account_id", "created_at"),
+        Index("idx_kalshi_paper_test_runs_status", "status", "updated_at"),
+    )
+
+
+class KalshiPaperTestEvent(Base):
+    __tablename__ = "kalshi_paper_test_events"
+
+    run_id = Column(String, primary_key=True)
+    sequence = Column(BigInteger, primary_key=True)
+    account_id = Column(String, nullable=False)
+    event_type = Column(String, nullable=False)
+    position_id = Column(String, nullable=True)
+    best_bid = Column(Numeric(asdecimal=True), nullable=True)
+    trigger_price = Column(Numeric(asdecimal=True), nullable=True)
+    exit_decision_id = Column(String, nullable=True)
+    market_observed_at = Column(DateTime, nullable=True)
+    book_observed_at = Column(DateTime, nullable=True)
+    quote_evidence_hash = Column(String(64), nullable=True)
+    quote_evidence_json = Column(Text, nullable=True)
+    remaining_quantity = Column(Numeric(asdecimal=True), nullable=True)
+    realized_pnl = Column(Numeric(asdecimal=True), nullable=True)
+    reason = Column(String, nullable=True)
+    created_at = Column(DateTime, default=_utcnow, nullable=False)
+
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["run_id"], ["kalshi_paper_test_runs.run_id"], ondelete="RESTRICT",
+            name="fk_kalshi_paper_test_events_run",
+        ),
+        ForeignKeyConstraint(
+            ["account_id", "position_id"],
+            ["kalshi_paper_positions.account_id", "kalshi_paper_positions.position_id"],
+            ondelete="RESTRICT",
+            name="fk_kalshi_paper_test_events_position",
+        ),
+        UniqueConstraint(
+            "run_id", "event_type", "exit_decision_id",
+            name="uq_kalshi_paper_test_events_semantic_exit",
+        ),
+        CheckConstraint("sequence > 0", name="ck_kalshi_paper_test_events_sequence"),
+        CheckConstraint(
+            "event_type IN ('started','entry_filled','entry_unfilled','no_bid','hold',"
+            "'take_profit_triggered','stop_loss_triggered','exit_filled','exit_partial',"
+            "'exit_no_fill','paused','resumed','stopped','completed','blocked')",
+            name="ck_kalshi_paper_test_events_type",
+        ),
+        CheckConstraint(
+            "best_bid IS NULL OR (best_bid <> 'NaN'::numeric AND best_bid > 0 AND best_bid < 1 "
+            "AND scale(best_bid) <= 6)",
+            name="ck_kalshi_paper_test_events_bid",
+        ),
+        CheckConstraint(
+            "trigger_price IS NULL OR (trigger_price <> 'NaN'::numeric AND trigger_price > 0 "
+            "AND trigger_price < 1 AND scale(trigger_price) <= 6)",
+            name="ck_kalshi_paper_test_events_trigger",
+        ),
+        CheckConstraint(
+            "remaining_quantity IS NULL OR (remaining_quantity <> 'NaN'::numeric "
+            "AND remaining_quantity < 'Infinity'::numeric AND remaining_quantity >= 0 "
+            "AND scale(remaining_quantity) <= 2)",
+            name="ck_kalshi_paper_test_events_remaining",
+        ),
+        CheckConstraint(
+            "realized_pnl IS NULL OR (realized_pnl <> 'NaN'::numeric "
+            "AND realized_pnl < 'Infinity'::numeric AND realized_pnl > '-Infinity'::numeric "
+            "AND scale(realized_pnl) <= 18)",
+            name="ck_kalshi_paper_test_events_pnl",
+        ),
+        CheckConstraint(
+            "quote_evidence_hash IS NULL OR quote_evidence_hash ~ '^[0-9a-f]{64}$'",
+            name="ck_kalshi_paper_test_events_hash",
+        ),
+        Index("idx_kalshi_paper_test_events_exit", "account_id", "exit_decision_id"),
+    )
+
+
+# ==================== VENUE-NEUTRAL EXECUTION LEDGER ==================
 
 
 class VenueOrderIntentRecord(Base):
@@ -4618,6 +4765,491 @@ def _register_paper_position_validation(account_table, decision_table, position_
     )
 
 
+def _register_paper_test_trade_validation(run_table, event_table) -> None:  # noqa: ANN001
+    _sa_event.listen(
+        run_table,
+        "after_create",
+        DDL(
+            """
+            CREATE OR REPLACE FUNCTION protect_kalshi_paper_test_run_request()
+            RETURNS trigger AS $$
+            BEGIN
+                IF NEW.run_id IS DISTINCT FROM OLD.run_id
+                   OR NEW.request_hash IS DISTINCT FROM OLD.request_hash
+                   OR NEW.request_json IS DISTINCT FROM OLD.request_json
+                   OR NEW.account_id IS DISTINCT FROM OLD.account_id
+                   OR NEW.opportunity_id IS DISTINCT FROM OLD.opportunity_id
+                   OR NEW.opportunity_revision IS DISTINCT FROM OLD.opportunity_revision
+                   OR NEW.ticker IS DISTINCT FROM OLD.ticker
+                   OR NEW.outcome IS DISTINCT FROM OLD.outcome
+                   OR NEW.quantity IS DISTINCT FROM OLD.quantity
+                   OR NEW.entry_limit_price IS DISTINCT FROM OLD.entry_limit_price
+                   OR NEW.take_profit_price IS DISTINCT FROM OLD.take_profit_price
+                   OR NEW.stop_loss_price IS DISTINCT FROM OLD.stop_loss_price
+                   OR NEW.stop_loss_minimum_price IS DISTINCT FROM OLD.stop_loss_minimum_price
+                   OR NEW.entry_decision_id IS DISTINCT FROM OLD.entry_decision_id
+                   OR NEW.created_at IS DISTINCT FROM OLD.created_at THEN
+                    RAISE EXCEPTION 'Kalshi paper test run immutable request facts cannot change';
+                END IF;
+                RETURN NEW;
+            END;
+            $$ LANGUAGE plpgsql
+            """
+        ),
+    )
+    _sa_event.listen(
+        run_table,
+        "after_create",
+        DDL(
+            "CREATE TRIGGER trg_kalshi_paper_test_runs_protect_request "
+            "BEFORE UPDATE ON kalshi_paper_test_runs FOR EACH ROW "
+            "EXECUTE FUNCTION protect_kalshi_paper_test_run_request()"
+        ),
+    )
+    _sa_event.listen(
+        run_table,
+        "after_create",
+        DDL(
+            """
+            CREATE OR REPLACE FUNCTION validate_kalshi_paper_test_run_projection()
+            RETURNS trigger AS $$
+            DECLARE appended_count bigint; latest_event_type text;
+            BEGIN
+                IF NEW.position_id IS NOT NULL AND NOT EXISTS (
+                    SELECT 1 FROM kalshi_paper_positions p
+                     WHERE p.account_id=NEW.account_id AND p.position_id=NEW.position_id
+                       AND p.entry_decision_id=NEW.entry_decision_id
+                       AND p.ticker=NEW.ticker AND p.outcome=NEW.outcome
+                ) THEN
+                    RAISE EXCEPTION 'Kalshi paper test run position causality is invalid';
+                END IF;
+                IF NEW.status IS DISTINCT FROM OLD.status AND NOT (
+                    (OLD.status='starting' AND NEW.status IN ('monitoring','entry_unfilled','blocked')) OR
+                    (OLD.status='monitoring' AND NEW.status IN ('paused','stopped','completed','blocked')) OR
+                    (OLD.status='paused' AND NEW.status IN ('monitoring','stopped','blocked'))
+                ) THEN
+                    RAISE EXCEPTION 'Kalshi paper test run status transition is invalid';
+                END IF;
+                IF NEW.next_event_sequence < OLD.next_event_sequence THEN
+                    RAISE EXCEPTION 'Kalshi paper test run event sequence cannot regress';
+                END IF;
+                IF NEW.next_event_sequence = OLD.next_event_sequence THEN
+                    IF NEW.position_id IS DISTINCT FROM OLD.position_id OR NEW.status IS DISTINCT FROM OLD.status
+                       OR NEW.last_reason IS DISTINCT FROM OLD.last_reason
+                       OR NEW.last_error IS DISTINCT FROM OLD.last_error THEN
+                        RAISE EXCEPTION 'Kalshi paper test run projection changed without lifecycle event';
+                    END IF;
+                ELSE
+                    SELECT count(*), max(event_type) FILTER (WHERE sequence=NEW.next_event_sequence-1)
+                      INTO appended_count, latest_event_type
+                      FROM kalshi_paper_test_events
+                     WHERE run_id=NEW.run_id AND sequence>=OLD.next_event_sequence
+                       AND sequence<NEW.next_event_sequence;
+                    IF appended_count IS DISTINCT FROM NEW.next_event_sequence-OLD.next_event_sequence
+                       OR latest_event_type IS NULL THEN
+                        RAISE EXCEPTION 'Kalshi paper test run projection lacks contiguous lifecycle events';
+                    END IF;
+                    IF NEW.status IS DISTINCT FROM OLD.status AND NOT (
+                        (NEW.status='monitoring' AND latest_event_type IN ('entry_filled','resumed')) OR
+                        (NEW.status='entry_unfilled' AND latest_event_type='entry_unfilled') OR
+                        (NEW.status='paused' AND latest_event_type='paused') OR
+                        (NEW.status='stopped' AND latest_event_type='stopped') OR
+                        (NEW.status='completed' AND latest_event_type='completed') OR
+                        (NEW.status='blocked' AND latest_event_type='blocked')
+                    ) THEN
+                        RAISE EXCEPTION 'Kalshi paper test run status lacks matching lifecycle event';
+                    END IF;
+                END IF;
+                RETURN NEW;
+            END;
+            $$ LANGUAGE plpgsql
+            """
+        ),
+    )
+    _sa_event.listen(
+        run_table,
+        "after_create",
+        DDL(
+            "CREATE CONSTRAINT TRIGGER trg_kalshi_paper_test_runs_validate_projection "
+            "AFTER UPDATE ON kalshi_paper_test_runs DEFERRABLE INITIALLY DEFERRED "
+            "FOR EACH ROW EXECUTE FUNCTION validate_kalshi_paper_test_run_projection()"
+        ),
+    )
+    _sa_event.listen(
+        event_table,
+        "after_create",
+        DDL(
+            """
+            CREATE OR REPLACE FUNCTION validate_kalshi_paper_test_event()
+            RETURNS trigger AS $$
+            DECLARE controlled kalshi_paper_test_runs%%ROWTYPE;
+                    decided kalshi_paper_decisions%%ROWTYPE;
+                    observed_best numeric;
+                    authoritative_remaining numeric;
+                    authoritative_pnl numeric;
+            BEGIN
+                SELECT * INTO controlled FROM kalshi_paper_test_runs WHERE run_id = NEW.run_id;
+                IF NOT FOUND OR NEW.account_id IS DISTINCT FROM controlled.account_id
+                   OR NEW.sequence >= controlled.next_event_sequence THEN
+                    RAISE EXCEPTION 'Kalshi paper test event contradicts run sequence or account';
+                END IF;
+                IF NEW.position_id IS NOT NULL AND NEW.position_id IS DISTINCT FROM controlled.position_id THEN
+                    RAISE EXCEPTION 'Kalshi paper test event contradicts run position';
+                END IF;
+                IF (NEW.quote_evidence_json IS NULL) <> (NEW.quote_evidence_hash IS NULL)
+                   OR (NEW.quote_evidence_json IS NOT NULL AND
+                       encode(sha256(convert_to(NEW.quote_evidence_json, 'UTF8')), 'hex')
+                           IS DISTINCT FROM NEW.quote_evidence_hash) THEN
+                    RAISE EXCEPTION 'Kalshi paper test event quote hash is invalid';
+                END IF;
+                IF NEW.quote_evidence_json IS NOT NULL AND (
+                   NEW.quote_evidence_json ~ '[[:space:]]'
+                   OR NEW.quote_evidence_json !~ '^[{]"no_dollars":.*,"observed_at":"[^"]+","source_origin":"[^"]+","ticker":"[^"]+","yes_dollars":.*[}]$'
+                ) THEN
+                    RAISE EXCEPTION 'Kalshi paper test event quote evidence is not canonical';
+                END IF;
+                IF NEW.quote_evidence_json IS NOT NULL
+                   AND NEW.quote_evidence_json::jsonb->>'ticker' IS DISTINCT FROM controlled.ticker THEN
+                    RAISE EXCEPTION 'Kalshi paper test event quote ticker is invalid';
+                END IF;
+                IF NEW.event_type IN ('no_bid','hold','take_profit_triggered','stop_loss_triggered') THEN
+                    IF NEW.quote_evidence_json IS NULL OR NEW.market_observed_at IS NULL
+                       OR NEW.book_observed_at IS NULL THEN
+                        RAISE EXCEPTION 'Kalshi paper test observation evidence is incomplete';
+                    END IF;
+                    SELECT max((level->>0)::numeric) INTO observed_best
+                      FROM jsonb_array_elements(
+                        CASE WHEN controlled.outcome='yes' THEN NEW.quote_evidence_json::jsonb->'yes_dollars'
+                             ELSE NEW.quote_evidence_json::jsonb->'no_dollars' END
+                      ) level;
+                    IF NEW.best_bid IS DISTINCT FROM observed_best THEN
+                        RAISE EXCEPTION 'Kalshi paper test event best bid contradicts quote evidence';
+                    END IF;
+                    IF NEW.event_type = 'no_bid' AND NEW.best_bid IS NOT NULL THEN
+                        RAISE EXCEPTION 'Kalshi paper test no-bid event contradicts quote evidence';
+                    END IF;
+                    IF NEW.event_type = 'hold' AND
+                       (NEW.best_bid IS NULL OR NEW.best_bid <= controlled.stop_loss_price
+                        OR NEW.best_bid >= controlled.take_profit_price) THEN
+                        RAISE EXCEPTION 'Kalshi paper test hold arithmetic is invalid';
+                    END IF;
+                END IF;
+                IF NEW.event_type IN ('take_profit_triggered','stop_loss_triggered') THEN
+                    IF NEW.exit_decision_id IS NULL
+                       OR NEW.exit_decision_id IS DISTINCT FROM
+                          'paper-test-exit:' || NEW.run_id || ':' || NEW.sequence::text
+                       OR NEW.best_bid IS NULL OR NEW.trigger_price IS NULL THEN
+                        RAISE EXCEPTION 'Kalshi paper test trigger event shape is invalid';
+                    END IF;
+                    IF NEW.event_type = 'take_profit_triggered' AND
+                       (NEW.trigger_price IS DISTINCT FROM controlled.take_profit_price
+                        OR NEW.best_bid < NEW.trigger_price) THEN
+                        RAISE EXCEPTION 'Kalshi paper test take-profit trigger arithmetic is invalid';
+                    END IF;
+                    IF NEW.event_type = 'stop_loss_triggered' AND
+                       (NEW.trigger_price IS DISTINCT FROM controlled.stop_loss_price
+                        OR NEW.best_bid > NEW.trigger_price) THEN
+                        RAISE EXCEPTION 'Kalshi paper test stop-loss trigger arithmetic is invalid';
+                    END IF;
+                ELSIF NEW.event_type IN ('no_bid','hold') THEN
+                    IF NEW.exit_decision_id IS NOT NULL OR NEW.trigger_price IS NOT NULL THEN
+                        RAISE EXCEPTION 'Kalshi paper test observation event shape is invalid';
+                    END IF;
+                END IF;
+                IF NEW.event_type IN ('exit_filled','exit_partial','exit_no_fill') THEN
+                    IF NOT EXISTS (
+                        SELECT 1 FROM kalshi_paper_test_events trigger_event
+                         WHERE trigger_event.run_id = NEW.run_id
+                           AND trigger_event.exit_decision_id = NEW.exit_decision_id
+                           AND trigger_event.event_type IN ('take_profit_triggered','stop_loss_triggered')
+                    ) THEN
+                        RAISE EXCEPTION 'Kalshi paper test exit event has no trigger evidence';
+                    END IF;
+                    IF NEW.reason='position_changed_before_exit' THEN
+                        IF NEW.event_type IS DISTINCT FROM 'exit_no_fill' THEN
+                            RAISE EXCEPTION 'Kalshi paper test exceptional exit event shape is invalid';
+                        END IF;
+                    ELSE
+                        SELECT * INTO decided FROM kalshi_paper_decisions
+                         WHERE account_id = NEW.account_id AND decision_id = NEW.exit_decision_id;
+                        IF NOT FOUND OR decided.order_side IS DISTINCT FROM 'sell'
+                           OR decided.position_id IS DISTINCT FROM controlled.position_id
+                           OR decided.ticker IS DISTINCT FROM controlled.ticker
+                           OR decided.outcome IS DISTINCT FROM controlled.outcome THEN
+                            RAISE EXCEPTION 'Kalshi paper test exit event contradicts decision causality';
+                        END IF;
+                    END IF;
+                    SELECT p.entry_quantity-COALESCE(sum(d.filled_quantity) FILTER (WHERE d.order_side='sell'),0),
+                           COALESCE(sum(d.realized_pnl) FILTER (WHERE d.order_side='sell'),0)
+                      INTO authoritative_remaining, authoritative_pnl
+                      FROM kalshi_paper_positions p
+                      LEFT JOIN kalshi_paper_decisions d
+                        ON d.account_id=p.account_id AND d.position_id=p.position_id
+                     WHERE p.account_id=controlled.account_id AND p.position_id=controlled.position_id
+                     GROUP BY p.entry_quantity;
+                    IF NEW.position_id IS DISTINCT FROM controlled.position_id
+                       OR NEW.remaining_quantity IS DISTINCT FROM authoritative_remaining
+                       OR NEW.realized_pnl IS DISTINCT FROM authoritative_pnl THEN
+                        RAISE EXCEPTION 'Kalshi paper test exit event contradicts authoritative position projection';
+                    END IF;
+                END IF;
+                IF NEW.event_type = 'completed' THEN
+                    SELECT p.entry_quantity-COALESCE(sum(d.filled_quantity) FILTER (WHERE d.order_side='sell'),0),
+                           COALESCE(sum(d.realized_pnl) FILTER (WHERE d.order_side='sell'),0)
+                      INTO authoritative_remaining, authoritative_pnl
+                      FROM kalshi_paper_positions p
+                      LEFT JOIN kalshi_paper_decisions d
+                        ON d.account_id=p.account_id AND d.position_id=p.position_id
+                     WHERE p.account_id=controlled.account_id AND p.position_id=controlled.position_id
+                     GROUP BY p.entry_quantity;
+                    IF NEW.position_id IS DISTINCT FROM controlled.position_id
+                       OR authoritative_remaining IS DISTINCT FROM 0
+                       OR NEW.remaining_quantity IS DISTINCT FROM authoritative_remaining
+                       OR NEW.realized_pnl IS DISTINCT FROM authoritative_pnl THEN
+                        RAISE EXCEPTION 'Kalshi paper test completed event contradicts authoritative position';
+                    END IF;
+                END IF;
+                IF NEW.event_type = 'entry_filled' AND NOT EXISTS (
+                    SELECT 1 FROM kalshi_paper_positions p
+                     WHERE p.account_id = controlled.account_id AND p.position_id = NEW.position_id
+                       AND p.entry_decision_id = controlled.entry_decision_id
+                       AND p.ticker = controlled.ticker AND p.outcome = controlled.outcome
+                ) THEN
+                    RAISE EXCEPTION 'Kalshi paper test entry event contradicts position causality';
+                END IF;
+                IF NEW.event_type = 'entry_unfilled' AND
+                   (controlled.position_id IS NOT NULL OR NOT EXISTS (
+                       SELECT 1 FROM kalshi_paper_decisions entry_decision
+                        WHERE entry_decision.account_id = controlled.account_id
+                          AND entry_decision.decision_id = controlled.entry_decision_id
+                          AND entry_decision.order_side = 'buy' AND entry_decision.filled_quantity = 0
+                   )) THEN
+                    RAISE EXCEPTION 'Kalshi paper test unfilled event contradicts entry decision';
+                END IF;
+                RETURN NEW;
+            END;
+            $$ LANGUAGE plpgsql
+            """
+        ),
+    )
+    _sa_event.listen(
+        event_table,
+        "after_create",
+        DDL(
+            "CREATE CONSTRAINT TRIGGER trg_kalshi_paper_test_events_validate "
+            "AFTER INSERT ON kalshi_paper_test_events DEFERRABLE INITIALLY DEFERRED "
+            "FOR EACH ROW EXECUTE FUNCTION validate_kalshi_paper_test_event()"
+        ),
+    )
+
+    # Initial run insertion is itself part of the append-only event protocol.
+    # Keep it separate from updates: the pre-I/O `starting` commit has no entry
+    # decision yet, while transitions out of `starting` must bind one exactly.
+    _sa_event.listen(
+        run_table,
+        "after_create",
+        DDL(
+            """
+            CREATE OR REPLACE FUNCTION validate_kalshi_paper_test_run_insert()
+            RETURNS trigger AS $$
+            DECLARE canonical_request text; matching_started bigint; total_events bigint;
+            BEGIN
+                canonical_request :=
+                    '{"account_id":' || to_json(NEW.account_id)::text ||
+                    ',"entry_limit_price":' || to_json('0.' || lpad(trunc(NEW.entry_limit_price*1000000)::text,6,'0'))::text ||
+                    ',"opportunity_id":' || to_json(NEW.opportunity_id)::text ||
+                    ',"opportunity_revision":' || to_json(NEW.opportunity_revision)::text ||
+                    ',"quantity":' || to_json(trunc(NEW.quantity)::text || '.' ||
+                        lpad(trunc((NEW.quantity-trunc(NEW.quantity))*100)::text,2,'0'))::text ||
+                    ',"run_id":' || to_json(NEW.run_id)::text ||
+                    ',"stop_loss_minimum_price":' || to_json('0.' || lpad(trunc(NEW.stop_loss_minimum_price*1000000)::text,6,'0'))::text ||
+                    ',"stop_loss_price":' || to_json('0.' || lpad(trunc(NEW.stop_loss_price*1000000)::text,6,'0'))::text ||
+                    ',"take_profit_price":' || to_json('0.' || lpad(trunc(NEW.take_profit_price*1000000)::text,6,'0'))::text || '}';
+                IF NEW.request_json IS DISTINCT FROM canonical_request
+                   OR encode(sha256(convert_to(NEW.request_json,'UTF8')),'hex') IS DISTINCT FROM NEW.request_hash THEN
+                    RAISE EXCEPTION 'Kalshi paper test run canonical request identity is invalid';
+                END IF;
+                IF NEW.status IS DISTINCT FROM 'starting' OR NEW.position_id IS NOT NULL
+                   OR NEW.next_event_sequence IS DISTINCT FROM 2
+                   OR NEW.last_reason IS DISTINCT FROM 'operator_started' OR NEW.last_error IS NOT NULL THEN
+                    RAISE EXCEPTION 'Kalshi paper test run initial projection is invalid';
+                END IF;
+                SELECT count(*), count(*) FILTER (WHERE sequence=1 AND account_id=NEW.account_id
+                    AND event_type='started' AND position_id IS NULL AND best_bid IS NULL
+                    AND trigger_price IS NULL AND exit_decision_id IS NULL AND market_observed_at IS NULL
+                    AND book_observed_at IS NULL AND quote_evidence_hash IS NULL AND quote_evidence_json IS NULL
+                    AND remaining_quantity IS NULL AND realized_pnl IS NULL
+                    AND reason='operator_started' AND created_at=NEW.created_at)
+                  INTO total_events, matching_started
+                  FROM kalshi_paper_test_events WHERE run_id=NEW.run_id;
+                IF total_events IS DISTINCT FROM 1 OR matching_started IS DISTINCT FROM 1 THEN
+                    RAISE EXCEPTION 'Kalshi paper test run requires exactly one canonical started event';
+                END IF;
+                RETURN NEW;
+            END;
+            $$ LANGUAGE plpgsql
+            """
+        ),
+    )
+    _sa_event.listen(
+        run_table,
+        "after_create",
+        DDL(
+            "CREATE CONSTRAINT TRIGGER trg_kalshi_paper_test_runs_validate_insert "
+            "AFTER INSERT ON kalshi_paper_test_runs DEFERRABLE INITIALLY DEFERRED "
+            "FOR EACH ROW EXECUTE FUNCTION validate_kalshi_paper_test_run_insert()"
+        ),
+    )
+    _sa_event.listen(
+        run_table,
+        "after_create",
+        DDL(
+            """
+            CREATE OR REPLACE FUNCTION reject_kalshi_paper_test_run_erasure()
+            RETURNS trigger AS $$ BEGIN
+                RAISE EXCEPTION 'Kalshi paper test run projection cannot be erased';
+            END; $$ LANGUAGE plpgsql
+            """
+        ),
+    )
+    for operation, suffix, scope in (
+        ("DELETE", "delete", "FOR EACH ROW"),
+        ("TRUNCATE", "truncate", "FOR EACH STATEMENT"),
+    ):
+        _sa_event.listen(
+            run_table,
+            "after_create",
+            DDL(
+                f"CREATE TRIGGER trg_kalshi_paper_test_runs_reject_{suffix} BEFORE {operation} "
+                f"ON kalshi_paper_test_runs {scope} EXECUTE FUNCTION reject_kalshi_paper_test_run_erasure()"
+            ),
+        )
+    _sa_event.listen(
+        run_table,
+        "after_create",
+        DDL(
+            """
+            CREATE OR REPLACE FUNCTION validate_kalshi_paper_test_entry_transition()
+            RETURNS trigger AS $$
+            BEGIN
+                IF OLD.status='starting' AND NEW.status IN ('monitoring','entry_unfilled') THEN
+                    IF NOT EXISTS (
+                        SELECT 1 FROM kalshi_paper_intents i
+                         WHERE i.account_id=NEW.account_id AND i.decision_id=NEW.entry_decision_id
+                           AND i.action='execute' AND COALESCE(i.order_side,'buy')='buy'
+                           AND COALESCE(i.time_in_force,'immediate_or_cancel')='immediate_or_cancel'
+                           AND i.position_id IS NULL AND i.opportunity_id=NEW.opportunity_id
+                           AND i.opportunity_revision=NEW.opportunity_revision AND i.ticker=NEW.ticker
+                           AND i.outcome=NEW.outcome AND i.requested_quantity=NEW.quantity
+                           AND i.limit_price=NEW.entry_limit_price
+                    ) OR NOT EXISTS (
+                        SELECT 1 FROM kalshi_paper_decisions d
+                         WHERE d.account_id=NEW.account_id AND d.decision_id=NEW.entry_decision_id
+                           AND d.action='execute' AND d.order_side='buy'
+                           AND d.time_in_force='immediate_or_cancel' AND d.position_id IS NULL
+                           AND d.opportunity_id=NEW.opportunity_id
+                           AND d.opportunity_revision=NEW.opportunity_revision AND d.ticker=NEW.ticker
+                           AND d.outcome=NEW.outcome AND d.requested_quantity=NEW.quantity
+                           AND d.limit_price=NEW.entry_limit_price
+                           AND ((NEW.status='monitoring' AND d.filled_quantity>0)
+                             OR (NEW.status='entry_unfilled' AND d.filled_quantity=0))
+                    ) THEN
+                        RAISE EXCEPTION 'Kalshi paper test entry transition contradicts intent or decision causality';
+                    END IF;
+                END IF;
+                RETURN NEW;
+            END;
+            $$ LANGUAGE plpgsql
+            """
+        ),
+    )
+    _sa_event.listen(
+        run_table,
+        "after_create",
+        DDL(
+            "CREATE CONSTRAINT TRIGGER trg_kalshi_paper_test_runs_validate_entry_transition "
+            "AFTER UPDATE ON kalshi_paper_test_runs DEFERRABLE INITIALLY DEFERRED "
+            "FOR EACH ROW EXECUTE FUNCTION validate_kalshi_paper_test_entry_transition()"
+        ),
+    )
+    _sa_event.listen(
+        event_table,
+        "after_create",
+        DDL(
+            """
+            CREATE OR REPLACE FUNCTION validate_kalshi_paper_test_event_highs()
+            RETURNS trigger AS $$
+            DECLARE controlled kalshi_paper_test_runs%%ROWTYPE; evidence jsonb; observed_best numeric;
+            BEGIN
+                SELECT * INTO controlled FROM kalshi_paper_test_runs WHERE run_id=NEW.run_id;
+                IF NEW.event_type='started' AND (
+                    NEW.sequence IS DISTINCT FROM 1 OR NEW.account_id IS DISTINCT FROM controlled.account_id
+                    OR NEW.position_id IS NOT NULL OR NEW.best_bid IS NOT NULL OR NEW.trigger_price IS NOT NULL
+                    OR NEW.exit_decision_id IS NOT NULL OR NEW.market_observed_at IS NOT NULL
+                    OR NEW.book_observed_at IS NOT NULL OR NEW.quote_evidence_hash IS NOT NULL
+                    OR NEW.quote_evidence_json IS NOT NULL OR NEW.remaining_quantity IS NOT NULL
+                    OR NEW.realized_pnl IS NOT NULL OR NEW.reason IS DISTINCT FROM 'operator_started'
+                    OR NEW.created_at IS DISTINCT FROM controlled.created_at
+                ) THEN
+                    RAISE EXCEPTION 'Kalshi paper test started event shape is invalid';
+                END IF;
+                IF NEW.quote_evidence_json IS NOT NULL THEN
+                    evidence := NEW.quote_evidence_json::jsonb;
+                    IF jsonb_typeof(evidence) IS DISTINCT FROM 'object'
+                       OR (SELECT count(*) FROM jsonb_object_keys(evidence)) IS DISTINCT FROM 5
+                       OR EXISTS (SELECT 1 FROM jsonb_object_keys(evidence) key
+                                  WHERE key NOT IN ('no_dollars','observed_at','source_origin','ticker','yes_dollars'))
+                       OR jsonb_typeof(evidence->'no_dollars') IS DISTINCT FROM 'array'
+                       OR jsonb_typeof(evidence->'yes_dollars') IS DISTINCT FROM 'array'
+                       OR jsonb_typeof(evidence->'observed_at') IS DISTINCT FROM 'string'
+                       OR jsonb_typeof(evidence->'source_origin') IS DISTINCT FROM 'string'
+                       OR jsonb_typeof(evidence->'ticker') IS DISTINCT FROM 'string'
+                       OR NEW.quote_evidence_json IS DISTINCT FROM
+                          '{"no_dollars":' || regexp_replace((evidence->'no_dollars')::text,'[[:space:]]','','g') ||
+                          ',"observed_at":' || to_json(evidence->>'observed_at')::text ||
+                          ',"source_origin":' || to_json(evidence->>'source_origin')::text ||
+                          ',"ticker":' || to_json(evidence->>'ticker')::text ||
+                          ',"yes_dollars":' || regexp_replace((evidence->'yes_dollars')::text,'[[:space:]]','','g') || '}'
+                       OR evidence->>'ticker' IS DISTINCT FROM controlled.ticker
+                       OR evidence->>'source_origin' IS DISTINCT FROM 'https://external-api.kalshi.com'
+                       OR evidence->>'observed_at' IS DISTINCT FROM (
+                          to_char(NEW.book_observed_at,'YYYY-MM-DD"T"HH24:MI:SS') ||
+                          CASE WHEN to_char(NEW.book_observed_at,'US')='000000' THEN ''
+                               ELSE '.' || to_char(NEW.book_observed_at,'US') END || '+00:00')
+                       OR EXISTS (
+                           SELECT 1 FROM jsonb_array_elements((evidence->'no_dollars') || (evidence->'yes_dollars')) level
+                            WHERE jsonb_typeof(level) IS DISTINCT FROM 'array' OR jsonb_array_length(level)<>2
+                               OR jsonb_typeof(level->0) IS DISTINCT FROM 'string'
+                               OR jsonb_typeof(level->1) IS DISTINCT FROM 'string'
+                               OR level->>0 !~ '^0[.][0-9]{6}$' OR (level->>0)::numeric<=0 OR (level->>0)::numeric>=1
+                               OR level->>1 !~ '^(0|[1-9][0-9]*)[.][0-9]{2}$' OR (level->>1)::numeric<=0
+                       ) THEN
+                        RAISE EXCEPTION 'Kalshi paper test event quote evidence fact domain is invalid';
+                    END IF;
+                    SELECT max((level->>0)::numeric) INTO observed_best
+                      FROM jsonb_array_elements(CASE WHEN controlled.outcome='yes'
+                        THEN evidence->'yes_dollars' ELSE evidence->'no_dollars' END) level;
+                    IF NEW.best_bid IS DISTINCT FROM observed_best THEN
+                        RAISE EXCEPTION 'Kalshi paper test event controlled bid contradicts quote evidence';
+                    END IF;
+                END IF;
+                RETURN NEW;
+            END;
+            $$ LANGUAGE plpgsql
+            """
+        ),
+    )
+    _sa_event.listen(
+        event_table,
+        "after_create",
+        DDL(
+            "CREATE CONSTRAINT TRIGGER trg_kalshi_paper_test_events_validate_highs "
+            "AFTER INSERT ON kalshi_paper_test_events DEFERRABLE INITIALLY DEFERRED "
+            "FOR EACH ROW EXECUTE FUNCTION validate_kalshi_paper_test_event_highs()"
+        ),
+    )
+
+
 def _register_immutable_ledger_table(table) -> None:  # noqa: ANN001
     table.info["immutable_rows"] = True
     _sa_event.listen(
@@ -4784,6 +5416,9 @@ _register_paper_order_lifecycle_validation(
     KalshiPaperCancellation.__table__,
     KalshiPaperOrderEvent.__table__,
 )
+KalshiPaperTestRun.__table__.info["contains_immutable_rows"] = True
+_register_immutable_paper_table(KalshiPaperTestEvent.__table__)
+_register_paper_test_trade_validation(KalshiPaperTestRun.__table__, KalshiPaperTestEvent.__table__)
 _register_immutable_ledger_table(VenueOrderIntentRecord.__table__)
 _register_immutable_ledger_table(VenueExecutionEvent.__table__)
 _register_immutable_ledger_table(VenueProviderAcknowledgementRecord.__table__)
