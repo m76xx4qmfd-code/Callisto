@@ -13,6 +13,8 @@ import type {
   KalshiPaperOrder,
   KalshiPaperPosition,
   KalshiPaperPositionExitInput,
+  KalshiPaperTestRun,
+  KalshiPaperTestRunInput,
 } from '../src/services/apiKalshiPaper'
 
 const recordCalls: KalshiPaperDecisionInput[] = []
@@ -21,6 +23,10 @@ const cancellationCalls: KalshiPaperCancellationInput[] = []
 let cancellationResult: 'ambiguous' | 'success' = 'ambiguous'
 const positionExitCalls: KalshiPaperPositionExitInput[] = []
 let positionExitResult: 'ambiguous' | 'success' = 'ambiguous'
+const testRunCalls: KalshiPaperTestRunInput[] = []
+let testRunResult: 'ambiguous' | 'success' | 'mismatch' = 'ambiguous'
+const testControlCalls: Array<{ runId: string; action: 'pause' | 'resume' | 'stop' }> = []
+let testRunStatus: KalshiPaperTestRun['status'] = 'monitoring'
 
 const accounts: KalshiPaperAccount[] = [
   {
@@ -143,6 +149,52 @@ const openPosition: KalshiPaperPosition = {
   created_at: '2026-08-06T12:00:00Z',
 }
 
+const testRun: KalshiPaperTestRun = {
+  run_id: 'paper-test-run:fixture',
+  account_id: 'paper-secondary',
+  opportunity_id: eligibility.opportunity_id,
+  opportunity_revision: eligibility.opportunity_revision,
+  ticker: eligibility.ticker,
+  outcome: eligibility.outcome,
+  quantity: '2.00',
+  entry_limit_price: '0.600000',
+  take_profit_price: '0.700000',
+  stop_loss_price: '0.400000',
+  stop_loss_minimum_price: '0.300000',
+  entry_decision_id: 'paper-test-entry:paper-test-run:fixture',
+  position_id: openPosition.position_id,
+  status: 'monitoring',
+  next_event_sequence: 2,
+  remaining_quantity: '2.00',
+  realized_pnl: '0.000000000000000000',
+  last_error: null,
+  last_reason: 'entry_filled',
+  created_at: '2026-08-07T12:00:00Z',
+  updated_at: '2026-08-07T12:00:00Z',
+}
+
+const testRunDetail = {
+  run: testRun,
+  events: [{
+    run_id: 'paper-test-run:fixture',
+    account_id: 'paper-secondary',
+    sequence: 1,
+    event_type: 'entry_filled',
+    position_id: openPosition.position_id,
+    best_bid: null,
+    trigger_price: null,
+    exit_decision_id: null,
+    market_observed_at: null,
+    book_observed_at: null,
+    quote_evidence_hash: null,
+    quote_evidence_json: null,
+    remaining_quantity: '2.00',
+    realized_pnl: '0.000000000000000000',
+    reason: 'entry_filled',
+    created_at: '2026-08-07T12:00:00Z',
+  }],
+}
+
 vi.mock('../src/services/apiKalshiPaper', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../src/services/apiKalshiPaper')>()
   return {
@@ -152,7 +204,35 @@ vi.mock('../src/services/apiKalshiPaper', async (importOriginal) => {
     getKalshiPaperOrders: vi.fn(async (accountId: string) => accountId === 'paper-secondary' ? [openOrder] : []),
     getKalshiPaperPositions: vi.fn(async (accountId: string) => accountId === 'paper-secondary' ? [openPosition] : []),
     getKalshiPaperEligibility: vi.fn(async () => eligibility),
+    getKalshiPaperTestRuns: vi.fn(async (accountId: string) => accountId === 'paper-secondary'
+      ? [{ ...testRunDetail, run: { ...testRun, status: testRunStatus } }]
+      : []),
+    getKalshiPaperTestRun: vi.fn(async () => testRunDetail),
     createKalshiPaperAccount: vi.fn(async () => accounts[0]),
+    startKalshiPaperTestRun: vi.fn(async (input: KalshiPaperTestRunInput) => {
+      testRunCalls.push(JSON.parse(JSON.stringify(input)))
+      if (testRunResult === 'ambiguous') throw new Error('Network Error')
+      if (testRunResult === 'mismatch') throw new Error('Kalshi paper test run response identity mismatch')
+      return {
+        run: { ...testRun, ...input, entry_decision_id: `paper-test-entry:${input.run_id}` },
+        events: testRunDetail.events.map((event) => ({ ...event, run_id: input.run_id, account_id: input.account_id })),
+      }
+    }),
+    pauseKalshiPaperTestRun: vi.fn(async (runId: string) => {
+      testControlCalls.push({ runId, action: 'pause' })
+      testRunStatus = 'paused'
+      return { ...testRunDetail, run: { ...testRun, run_id: runId, status: 'paused' as const } }
+    }),
+    resumeKalshiPaperTestRun: vi.fn(async (runId: string) => {
+      testControlCalls.push({ runId, action: 'resume' })
+      testRunStatus = 'monitoring'
+      return { ...testRunDetail, run: { ...testRun, run_id: runId, status: 'monitoring' as const } }
+    }),
+    stopKalshiPaperTestRun: vi.fn(async (runId: string) => {
+      testControlCalls.push({ runId, action: 'stop' })
+      testRunStatus = 'stopped'
+      return { ...testRunDetail, run: { ...testRun, run_id: runId, status: 'stopped' as const } }
+    }),
     recordKalshiPaperDecision: vi.fn(async (input: KalshiPaperDecisionInput) => {
       recordCalls.push(JSON.parse(JSON.stringify(input)))
       if (recordResult === 'ambiguous') {
@@ -219,6 +299,10 @@ describe('KalshiPaperPanel ambiguous replay across reload', () => {
     cancellationResult = 'ambiguous'
     positionExitCalls.length = 0
     positionExitResult = 'ambiguous'
+    testRunCalls.length = 0
+    testRunResult = 'ambiguous'
+    testControlCalls.length = 0
+    testRunStatus = 'monitoring'
   })
 
   afterEach(() => {
@@ -385,5 +469,131 @@ describe('KalshiPaperPanel ambiguous replay across reload', () => {
     expect(accountSelect.hasAttribute('disabled')).toBe(true)
     expect(localStorage.getItem('callisto:kalshi-paper:pending-position-exit')).not.toBeNull()
     expect(screen.getByText(/Persisted retry identity cannot be decoded/)).toBeTruthy()
+  })
+
+  it('persists and explicitly replays one byte-equivalent paper test run after response loss and remount', async () => {
+    const user = userEvent.setup()
+    const first = mount()
+    const accountSelect = await screen.findByRole('combobox', { name: 'Paper account' })
+    await user.selectOptions(accountSelect, 'paper-secondary')
+    await user.type(screen.getByPlaceholderText('Opportunity ID or stable ID'), 'opp-live')
+    await user.click(screen.getByRole('button', { name: 'Validate' }))
+    await screen.findByText('KXTEST-26')
+
+    await user.clear(screen.getByRole('textbox', { name: 'Test quantity' }))
+    await user.type(screen.getByRole('textbox', { name: 'Test quantity' }), '2.00')
+    await user.clear(screen.getByRole('textbox', { name: 'Entry limit price' }))
+    await user.type(screen.getByRole('textbox', { name: 'Entry limit price' }), '0.600000')
+    await user.clear(screen.getByRole('textbox', { name: 'Take profit bid' }))
+    await user.type(screen.getByRole('textbox', { name: 'Take profit bid' }), '0.700000')
+    await user.clear(screen.getByRole('textbox', { name: 'Stop loss trigger bid' }))
+    await user.type(screen.getByRole('textbox', { name: 'Stop loss trigger bid' }), '0.400000')
+    await user.clear(screen.getByRole('textbox', { name: 'Stop loss minimum bid' }))
+    await user.type(screen.getByRole('textbox', { name: 'Stop loss minimum bid' }), '0.300000')
+    await user.click(screen.getByRole('button', { name: 'Start paper test run' }))
+    await waitFor(() => expect(testRunCalls.length).toBe(1))
+
+    const firstPayload = testRunCalls[0]
+    const firstBytes = JSON.stringify(firstPayload)
+    expect(firstPayload).toMatchObject({
+      account_id: 'paper-secondary',
+      opportunity_id: 'opp-live',
+      opportunity_revision: 'a'.repeat(64),
+      quantity: '2.00',
+      entry_limit_price: '0.600000',
+      take_profit_price: '0.700000',
+      stop_loss_price: '0.400000',
+      stop_loss_minimum_price: '0.300000',
+    })
+    expect(firstPayload.run_id).toMatch(/^paper-test-run:/)
+    expect(localStorage.getItem('callisto:kalshi-paper:pending-test-run')).toBe(firstBytes)
+    expect(screen.getByRole('combobox', { name: 'Paper account' }).hasAttribute('disabled')).toBe(true)
+    expect(screen.getByPlaceholderText('Opportunity ID or stable ID').hasAttribute('disabled')).toBe(true)
+    expect(screen.getByRole('textbox', { name: 'Test quantity' }).hasAttribute('disabled')).toBe(true)
+    await screen.findByText(/Test-run start outcome unknown/)
+
+    first.unmount()
+    testRunResult = 'success'
+    mount()
+    await screen.findByRole('button', { name: 'Retry same immutable test run' })
+    expect(testRunCalls.length).toBe(1)
+    await user.click(screen.getByRole('button', { name: 'Retry same immutable test run' }))
+    await waitFor(() => expect(testRunCalls.length).toBe(2))
+    expect(JSON.stringify(testRunCalls[1])).toBe(firstBytes)
+    await waitFor(() => expect(localStorage.getItem('callisto:kalshi-paper:pending-test-run')).toBeNull())
+  })
+
+  it('retains a pending test run on a shape-valid but identity-mismatched acknowledgement', async () => {
+    const pending: KalshiPaperTestRunInput = {
+      run_id: 'paper-test-run:mismatch',
+      account_id: 'paper-secondary',
+      opportunity_id: 'opp-live',
+      opportunity_revision: 'a'.repeat(64),
+      quantity: '2.00',
+      entry_limit_price: '0.600000',
+      take_profit_price: '0.700000',
+      stop_loss_price: '0.400000',
+      stop_loss_minimum_price: '0.300000',
+    }
+    localStorage.setItem('callisto:kalshi-paper:pending-test-run', JSON.stringify(pending))
+    testRunResult = 'mismatch'
+    const user = userEvent.setup()
+    mount()
+    await user.click(await screen.findByRole('button', { name: 'Retry same immutable test run' }))
+    await screen.findByText(/response identity mismatch/)
+    expect(localStorage.getItem('callisto:kalshi-paper:pending-test-run')).toBe(JSON.stringify(pending))
+  })
+
+  it('quarantines malformed test-run cache and synchronizes valid pending identity from another tab without replay', async () => {
+    localStorage.setItem('callisto:kalshi-paper:pending-test-run', JSON.stringify({
+      run_id: 'paper-test-run:bad',
+      account_id: 'paper-secondary',
+      quantity: 2,
+    }))
+    const first = mount()
+    expect((await screen.findByRole('combobox', { name: 'Paper account' })).hasAttribute('disabled')).toBe(true)
+    expect(screen.getByText(/Persisted retry identity cannot be decoded/)).toBeTruthy()
+    expect(localStorage.getItem('callisto:kalshi-paper:pending-test-run')).not.toBeNull()
+    first.unmount()
+
+    localStorage.removeItem('callisto:kalshi-paper:pending-test-run')
+    mount()
+    const pending: KalshiPaperTestRunInput = {
+      run_id: 'paper-test-run:other-tab',
+      account_id: 'paper-secondary',
+      opportunity_id: 'opp-live',
+      opportunity_revision: 'a'.repeat(64),
+      quantity: '2.00',
+      entry_limit_price: '0.600000',
+      take_profit_price: '0.700000',
+      stop_loss_price: '0.400000',
+      stop_loss_minimum_price: '0.300000',
+    }
+    localStorage.setItem('callisto:kalshi-paper:pending-test-run', JSON.stringify(pending))
+    window.dispatchEvent(new StorageEvent('storage', {
+      key: 'callisto:kalshi-paper:pending-test-run',
+      newValue: JSON.stringify(pending),
+    }))
+    await screen.findByRole('button', { name: 'Retry same immutable test run' })
+    expect(testRunCalls).toHaveLength(0)
+    expect(screen.getByRole('combobox', { name: 'Paper account' }).hasAttribute('disabled')).toBe(true)
+  })
+
+  it('renders authoritative events and invokes pause, resume, and stop only on operator clicks', async () => {
+    const user = userEvent.setup()
+    mount()
+    await user.selectOptions(await screen.findByRole('combobox', { name: 'Paper account' }), 'paper-secondary')
+    await waitFor(() => expect(screen.getAllByText('entry filled').length).toBeGreaterThan(0))
+    expect(screen.getByText(/Stop leaves any residual paper position open/)).toBeTruthy()
+    expect(testControlCalls).toHaveLength(0)
+
+    await user.click(await screen.findByRole('button', { name: 'Pause' }))
+    await waitFor(() => expect(testControlCalls).toEqual([{ runId: testRun.run_id, action: 'pause' }]))
+    await user.click(await screen.findByRole('button', { name: 'Resume' }))
+    await waitFor(() => expect(testControlCalls).toHaveLength(2))
+    expect(testControlCalls[1]).toEqual({ runId: testRun.run_id, action: 'resume' })
+    await user.click(await screen.findByRole('button', { name: 'Stop monitoring' }))
+    await waitFor(() => expect(testControlCalls).toHaveLength(3))
+    expect(testControlCalls[2]).toEqual({ runId: testRun.run_id, action: 'stop' })
   })
 })

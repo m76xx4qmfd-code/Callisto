@@ -7,6 +7,9 @@ import {
   getKalshiPaperDecisions,
   getKalshiPaperOrders,
   getKalshiPaperPositions,
+  getKalshiPaperTestRun,
+  getKalshiPaperTestRuns,
+  pauseKalshiPaperTestRun,
   recordKalshiPaperDecision,
   requireKalshiPaperAccount,
   requireKalshiPaperCancellation,
@@ -17,6 +20,13 @@ import {
   requireKalshiPaperOrder,
   requireKalshiPaperPosition,
   requireKalshiPaperPositionExitInput,
+  requireKalshiPaperTestEvent,
+  requireKalshiPaperTestRun,
+  requireKalshiPaperTestRunDetail,
+  requireKalshiPaperTestRunInput,
+  resumeKalshiPaperTestRun,
+  startKalshiPaperTestRun,
+  stopKalshiPaperTestRun,
 } from '../src/services/apiKalshiPaper.ts'
 
 const account = {
@@ -184,6 +194,51 @@ const sellDecision = {
     source_side: 'yes',
   }],
 }
+const testRunInput = {
+  run_id: 'paper-test-run:stable',
+  account_id: 'account',
+  opportunity_id: 'opportunity',
+  opportunity_revision: 'a'.repeat(64),
+  quantity: '2.00',
+  entry_limit_price: '0.600000',
+  take_profit_price: '0.700000',
+  stop_loss_price: '0.400000',
+  stop_loss_minimum_price: '0.300000',
+}
+const testEvent = {
+  run_id: testRunInput.run_id,
+  account_id: testRunInput.account_id,
+  sequence: 1,
+  event_type: 'entry_filled',
+  position_id: 'paper-position:abc',
+  best_bid: null,
+  trigger_price: null,
+  exit_decision_id: null,
+  market_observed_at: null,
+  book_observed_at: null,
+  quote_evidence_hash: null,
+  quote_evidence_json: null,
+  remaining_quantity: '2.00',
+  realized_pnl: '0.000000000000000000',
+  reason: 'entry_filled',
+  created_at: '2026-08-07T12:00:00Z',
+}
+const testRun = {
+  ...testRunInput,
+  ticker: 'KXTEST-26',
+  outcome: 'yes',
+  entry_decision_id: `paper-test-entry:${testRunInput.run_id}`,
+  position_id: 'paper-position:abc',
+  status: 'monitoring',
+  next_event_sequence: 2,
+  remaining_quantity: '2.00',
+  realized_pnl: '0.000000000000000000',
+  last_error: null,
+  last_reason: 'entry_filled',
+  created_at: '2026-08-07T12:00:00Z',
+  updated_at: '2026-08-07T12:00:00Z',
+}
+const testRunDetail = { run: testRun, events: [testEvent] }
 
 assert.equal(requireKalshiPaperAccount(account).cash_balance, '97.700000000000000000')
 assert.equal(requireKalshiPaperDecision(decision).fills[0].notional, '2.30000000')
@@ -198,6 +253,10 @@ assert.equal(requireKalshiPaperCancellation(cancellation).released_cash, '0.6000
 assert.equal(requireKalshiPaperPosition(position).realized_pnl, '-0.350000000000000000')
 assert.deepEqual(requireKalshiPaperPositionExitInput(positionExitInput), positionExitInput)
 assert.equal(requireKalshiPaperDecision(sellDecision).order_side, 'sell')
+assert.deepEqual(requireKalshiPaperTestRunInput(testRunInput), testRunInput)
+assert.equal(requireKalshiPaperTestEvent(testEvent).event_type, 'entry_filled')
+assert.equal(requireKalshiPaperTestRun(testRun).run_id, testRunInput.run_id)
+assert.equal(requireKalshiPaperTestRunDetail(testRunDetail).events[0].sequence, 1)
 assert.throws(() => requireKalshiPaperAccount({ ...account, cash_balance: 97.7 }), /text is required|exact decimal/i)
 assert.throws(() => requireKalshiPaperAccount({ ...account, currency: 'EUR' }), /enum/i)
 assert.throws(() => requireKalshiPaperDecision({ ...decision, requested_quantity: 4 }), /text or null/i)
@@ -220,6 +279,16 @@ assert.throws(
   () => requireKalshiPaperDecision({ ...decision, fills: [{ ...decision.fills[0], price: 0.575 }] }),
   /text is required|exact decimal/i,
 )
+assert.throws(() => requireKalshiPaperTestRunInput({ ...testRunInput, quantity: '2.0' }), /quantity scale/i)
+assert.throws(() => requireKalshiPaperTestRunInput({ ...testRunInput, entry_limit_price: '0.6' }), /price scale/i)
+assert.throws(() => requireKalshiPaperTestRunInput({ ...testRunInput, stop_loss_minimum_price: '0.500000' }), /threshold/i)
+assert.throws(() => requireKalshiPaperTestRunInput({ ...testRunInput, unexpected: true }), /unknown .*field/i)
+assert.throws(() => requireKalshiPaperTestEvent({ ...testEvent, event_type: 'invented' }), /enum/i)
+assert.throws(() => requireKalshiPaperTestEvent({ ...testEvent, sequence: '1' }), /integer/i)
+assert.throws(
+  () => requireKalshiPaperTestRunDetail({ ...testRunDetail, events: [{ ...testEvent, account_id: 'other' }] }),
+  /identity mismatch/i,
+)
 
 const originalPost = api.post
 api.post = async () => ({ data: { ...cancellation, order_id: 'paper-order:different' } })
@@ -239,7 +308,48 @@ api.post = async () => ({ data: { ...decision, decision_id: 'different-decision'
 await assert.rejects(() => recordKalshiPaperDecision(pendingAttempt), /identity mismatch/i)
 api.post = async () => ({ data: { ...sellDecision, position_id: 'paper-position:different' } })
 await assert.rejects(() => exitKalshiPaperPosition(positionExitInput), /identity mismatch/i)
+let capturedPost = null
+api.post = async (path, body) => {
+  capturedPost = { path, body: JSON.stringify(body) }
+  return { data: testRunDetail }
+}
+assert.equal((await startKalshiPaperTestRun(testRunInput)).run.run_id, testRunInput.run_id)
+assert.deepEqual(capturedPost, { path: '/kalshi/paper/test-runs', body: JSON.stringify(testRunInput) })
+api.post = async () => ({ data: {
+  run: { ...testRun, account_id: 'foreign-account' },
+  events: [{ ...testEvent, account_id: 'foreign-account' }],
+} })
+await assert.rejects(() => startKalshiPaperTestRun(testRunInput), /identity mismatch/i)
+for (const [control, method] of [
+  ['pause', pauseKalshiPaperTestRun],
+  ['resume', resumeKalshiPaperTestRun],
+  ['stop', stopKalshiPaperTestRun],
+]) {
+  api.post = async (path, body) => {
+    assert.equal(path, `/kalshi/paper/test-runs/${encodeURIComponent(testRun.run_id)}/${control}`)
+    assert.equal(body, undefined)
+    return { data: testRunDetail }
+  }
+  assert.equal((await method(testRun.run_id)).run.run_id, testRun.run_id)
+}
 api.post = originalPost
+
+api.get = async (path) => {
+  assert.equal(path, `/kalshi/paper/accounts/${encodeURIComponent(testRun.account_id)}/test-runs`)
+  return { data: [testRunDetail] }
+}
+assert.equal((await getKalshiPaperTestRuns(testRun.account_id))[0].run.account_id, testRun.account_id)
+api.get = async (path) => {
+  assert.equal(path, `/kalshi/paper/test-runs/${encodeURIComponent(testRun.run_id)}`)
+  return { data: testRunDetail }
+}
+assert.equal((await getKalshiPaperTestRun(testRun.run_id)).run.run_id, testRun.run_id)
+api.get = async () => ({ data: [{
+  run: { ...testRun, account_id: 'foreign-account' },
+  events: [{ ...testEvent, account_id: 'foreign-account' }],
+}] })
+await assert.rejects(() => getKalshiPaperTestRuns(testRun.account_id), /account identity mismatch/i)
+api.get = originalGet
 
 const panelSource = readFileSync(new URL('../src/components/KalshiPaperPanel.tsx', import.meta.url), 'utf8')
 const accountSelectTag = panelSource.match(/<select[\s\S]*?>/)?.[0] ?? ''
@@ -250,6 +360,7 @@ assert.match(createAccountTag, /disabled=\{inputFrozen \|\|/)
 assert.match(panelSource, /callisto:kalshi-paper:pending-attempt/)
 assert.match(panelSource, /callisto:kalshi-paper:pending-cancellation/)
 assert.match(panelSource, /callisto:kalshi-paper:pending-position-exit/)
+assert.match(panelSource, /callisto:kalshi-paper:pending-test-run/)
 assert.match(panelSource, /localStorage\.setItem\(PENDING_ATTEMPT_KEY, JSON\.stringify\(payload\)\)/)
 assert.match(panelSource, /return recordKalshiPaperDecision\(payload\)/)
 assert.match(panelSource, /Displayed cash is cached and new decisions are disabled/)
@@ -259,5 +370,7 @@ assert.match(panelSource, /Retry same immutable cancellation/)
 assert.match(panelSource, /Retry same immutable SELL IOC/)
 assert.match(panelSource, /SELL IOC — PAPER ONLY/)
 assert.match(panelSource, /Order refresh failed\. Cached orders are hidden and cancellation is disabled/)
+assert.match(panelSource, /TEST TRADES — PAPER ONLY/)
+assert.match(panelSource, /Stop leaves any residual paper position open/)
 
 console.log('Kalshi paper exact-wire validation passed')

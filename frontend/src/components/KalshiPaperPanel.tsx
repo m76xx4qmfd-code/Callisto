@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { AlertTriangle, BookOpen, Plus, RotateCcw, ShieldCheck } from 'lucide-react'
 import { Button } from './ui/button'
@@ -14,10 +14,16 @@ import {
   getKalshiPaperEligibility,
   getKalshiPaperOrders,
   getKalshiPaperPositions,
+  getKalshiPaperTestRuns,
+  pauseKalshiPaperTestRun,
   requireKalshiPaperCancellationInput,
   requireKalshiPaperDecisionInput,
   requireKalshiPaperPositionExitInput,
+  requireKalshiPaperTestRunInput,
   recordKalshiPaperDecision,
+  resumeKalshiPaperTestRun,
+  startKalshiPaperTestRun,
+  stopKalshiPaperTestRun,
 } from '../services/apiKalshiPaper'
 import type {
   KalshiPaperCancellationInput,
@@ -25,14 +31,20 @@ import type {
   KalshiPaperDecisionInput,
   KalshiPaperEligibility,
   KalshiPaperPositionExitInput,
+  KalshiPaperTestRunInput,
 } from '../services/apiKalshiPaper'
 
 const PENDING_ATTEMPT_KEY = 'callisto:kalshi-paper:pending-attempt'
 const PENDING_CANCELLATION_KEY = 'callisto:kalshi-paper:pending-cancellation'
 const PENDING_POSITION_EXIT_KEY = 'callisto:kalshi-paper:pending-position-exit'
+const PENDING_TEST_RUN_KEY = 'callisto:kalshi-paper:pending-test-run'
 
 function newDecisionId(): string {
   return `paper:${crypto.randomUUID()}`
+}
+
+function newTestRunId(): string {
+  return `paper-test-run:${crypto.randomUUID()}`
 }
 
 function loadPendingAttempt(): KalshiPaperDecisionInput | null {
@@ -65,6 +77,16 @@ function loadPendingPositionExit(): KalshiPaperPositionExitInput | null {
   }
 }
 
+function loadPendingTestRun(): KalshiPaperTestRunInput | null {
+  const stored = localStorage.getItem(PENDING_TEST_RUN_KEY)
+  if (stored === null) return null
+  try {
+    return requireKalshiPaperTestRunInput(JSON.parse(stored))
+  } catch {
+    return null
+  }
+}
+
 function errorMessage(error: unknown): string {
   if (error && typeof error === 'object' && 'response' in error) {
     const response = (error as { response?: { data?: { detail?: unknown } } }).response
@@ -74,8 +96,9 @@ function errorMessage(error: unknown): string {
 }
 
 function statusTone(status: string): string {
-  if (status === 'filled') return 'border-emerald-500/40 text-emerald-300'
-  if (status === 'partial' || status === 'no_fill' || status === 'passed') {
+  if (status === 'filled' || status === 'completed') return 'border-emerald-500/40 text-emerald-300'
+  if (status === 'starting' || status === 'monitoring') return 'border-blue-500/40 text-blue-300'
+  if (status === 'partial' || status === 'no_fill' || status === 'passed' || status === 'paused') {
     return 'border-amber-500/40 text-amber-300'
   }
   return 'border-red-500/40 text-red-300'
@@ -86,15 +109,31 @@ export default function KalshiPaperPanel() {
   const [pendingAttempt, setPendingAttempt] = useState<KalshiPaperDecisionInput | null>(loadPendingAttempt)
   const [pendingCancellation, setPendingCancellation] = useState<KalshiPaperCancellationInput | null>(loadPendingCancellation)
   const [pendingPositionExit, setPendingPositionExit] = useState<KalshiPaperPositionExitInput | null>(loadPendingPositionExit)
+  const [pendingTestRun, setPendingTestRun] = useState<KalshiPaperTestRunInput | null>(loadPendingTestRun)
+  const [pendingTestRunUnreadable, setPendingTestRunUnreadable] = useState(
+    () => localStorage.getItem(PENDING_TEST_RUN_KEY) !== null && loadPendingTestRun() === null,
+  )
   const [selectedAccountId, setSelectedAccountId] = useState(
-    pendingAttempt?.account_id ?? pendingCancellation?.account_id ?? pendingPositionExit?.account_id ?? '',
+    pendingAttempt?.account_id
+      ?? pendingCancellation?.account_id
+      ?? pendingPositionExit?.account_id
+      ?? pendingTestRun?.account_id
+      ?? '',
   )
   const [accountName, setAccountName] = useState('Kalshi Paper')
   const [startingCash, setStartingCash] = useState('10000.00')
-  const [opportunityId, setOpportunityId] = useState(pendingAttempt?.opportunity_id ?? '')
+  const [opportunityId, setOpportunityId] = useState(pendingAttempt?.opportunity_id ?? pendingTestRun?.opportunity_id ?? '')
   const [eligibility, setEligibility] = useState<KalshiPaperEligibility | null>(null)
   const [quantity, setQuantity] = useState(pendingAttempt?.quantity ?? '1.00')
   const [limitPrice, setLimitPrice] = useState(pendingAttempt?.limit_price ?? '0.500000')
+  const [testRunId, setTestRunId] = useState(pendingTestRun?.run_id ?? newTestRunId)
+  const [testQuantity, setTestQuantity] = useState(pendingTestRun?.quantity ?? '1.00')
+  const [testEntryLimitPrice, setTestEntryLimitPrice] = useState(pendingTestRun?.entry_limit_price ?? '0.600000')
+  const [takeProfitPrice, setTakeProfitPrice] = useState(pendingTestRun?.take_profit_price ?? '0.700000')
+  const [stopLossPrice, setStopLossPrice] = useState(pendingTestRun?.stop_loss_price ?? '0.400000')
+  const [stopLossMinimumPrice, setStopLossMinimumPrice] = useState(
+    pendingTestRun?.stop_loss_minimum_price ?? '0.300000',
+  )
   const [timeInForce, setTimeInForce] = useState<'immediate_or_cancel' | 'good_till_canceled'>(
     pendingAttempt?.time_in_force ?? 'immediate_or_cancel',
   )
@@ -103,6 +142,36 @@ export default function KalshiPaperPanel() {
   const [selectedPositionId, setSelectedPositionId] = useState(pendingPositionExit?.position_id ?? '')
   const [exitQuantity, setExitQuantity] = useState(pendingPositionExit?.quantity ?? '')
   const [minimumExitPrice, setMinimumExitPrice] = useState(pendingPositionExit?.minimum_price ?? '0.010000')
+
+  useEffect(() => {
+    const synchronizePendingTestRun = (event: StorageEvent) => {
+      if (event.key !== PENDING_TEST_RUN_KEY) return
+      if (event.newValue === null) {
+        setPendingTestRun(null)
+        setPendingTestRunUnreadable(false)
+        return
+      }
+      try {
+        const payload = requireKalshiPaperTestRunInput(JSON.parse(event.newValue))
+        setPendingTestRun(payload)
+        setSelectedAccountId(payload.account_id)
+        setOpportunityId(payload.opportunity_id)
+        setEligibility(null)
+        setTestRunId(payload.run_id)
+        setTestQuantity(payload.quantity)
+        setTestEntryLimitPrice(payload.entry_limit_price)
+        setTakeProfitPrice(payload.take_profit_price)
+        setStopLossPrice(payload.stop_loss_price)
+        setStopLossMinimumPrice(payload.stop_loss_minimum_price)
+        setPendingTestRunUnreadable(false)
+      } catch {
+        setPendingTestRun(null)
+        setPendingTestRunUnreadable(true)
+      }
+    }
+    window.addEventListener('storage', synchronizePendingTestRun)
+    return () => window.removeEventListener('storage', synchronizePendingTestRun)
+  }, [])
 
   const accountsQuery = useQuery({
     queryKey: ['kalshi-paper-accounts'],
@@ -133,6 +202,12 @@ export default function KalshiPaperPanel() {
     enabled: Boolean(activeAccountId),
     refetchInterval: 10000,
   })
+  const testRunsQuery = useQuery({
+    queryKey: ['kalshi-paper-test-runs', activeAccountId],
+    queryFn: () => getKalshiPaperTestRuns(activeAccountId),
+    enabled: Boolean(activeAccountId),
+    refetchInterval: 5000,
+  })
 
   const createAccount = useMutation({
     mutationFn: () => createKalshiPaperAccount({ name: accountName, starting_cash: startingCash }),
@@ -141,6 +216,7 @@ export default function KalshiPaperPanel() {
         localStorage.getItem(PENDING_ATTEMPT_KEY) === null
         && localStorage.getItem(PENDING_CANCELLATION_KEY) === null
         && localStorage.getItem(PENDING_POSITION_EXIT_KEY) === null
+        && localStorage.getItem(PENDING_TEST_RUN_KEY) === null
       ) setSelectedAccountId(account.id)
       await queryClient.invalidateQueries({ queryKey: ['kalshi-paper-accounts'] })
     },
@@ -152,6 +228,7 @@ export default function KalshiPaperPanel() {
         localStorage.getItem(PENDING_ATTEMPT_KEY) !== null
         || localStorage.getItem(PENDING_CANCELLATION_KEY) !== null
         || localStorage.getItem(PENDING_POSITION_EXIT_KEY) !== null
+        || localStorage.getItem(PENDING_TEST_RUN_KEY) !== null
       ) return
       setEligibility(result)
       setDecisionId(newDecisionId())
@@ -181,6 +258,76 @@ export default function KalshiPaperPanel() {
         queryClient.invalidateQueries({ queryKey: ['kalshi-paper-accounts'] }),
         queryClient.invalidateQueries({ queryKey: ['kalshi-paper-decisions', activeAccountId] }),
       ])
+    },
+  })
+  const startTestRun = useMutation({
+    mutationFn: () => {
+      let payload = pendingTestRun
+      if (payload === null) {
+        if (!activeAccountId || !eligibility) throw new Error('Select an account and validate an opportunity first')
+        payload = requireKalshiPaperTestRunInput({
+          run_id: testRunId,
+          account_id: activeAccountId,
+          opportunity_id: opportunityId.trim(),
+          opportunity_revision: eligibility.opportunity_revision,
+          quantity: testQuantity,
+          entry_limit_price: testEntryLimitPrice,
+          take_profit_price: takeProfitPrice,
+          stop_loss_price: stopLossPrice,
+          stop_loss_minimum_price: stopLossMinimumPrice,
+        })
+        localStorage.setItem(PENDING_TEST_RUN_KEY, JSON.stringify(payload))
+        setPendingTestRun(payload)
+      }
+      return startKalshiPaperTestRun(payload)
+    },
+    onSuccess: async ({ run }) => {
+      const acknowledgedPayload: KalshiPaperTestRunInput = {
+        run_id: run.run_id,
+        account_id: run.account_id,
+        opportunity_id: run.opportunity_id,
+        opportunity_revision: run.opportunity_revision,
+        quantity: run.quantity,
+        entry_limit_price: run.entry_limit_price,
+        take_profit_price: run.take_profit_price,
+        stop_loss_price: run.stop_loss_price,
+        stop_loss_minimum_price: run.stop_loss_minimum_price,
+      }
+      const stored = localStorage.getItem(PENDING_TEST_RUN_KEY)
+      if (stored === JSON.stringify(acknowledgedPayload)) {
+        localStorage.removeItem(PENDING_TEST_RUN_KEY)
+        setPendingTestRun(null)
+        setPendingTestRunUnreadable(false)
+        setTestRunId(newTestRunId())
+      } else if (stored !== null) {
+        try {
+          setPendingTestRun(requireKalshiPaperTestRunInput(JSON.parse(stored)))
+          setPendingTestRunUnreadable(false)
+        } catch {
+          setPendingTestRun(null)
+          setPendingTestRunUnreadable(true)
+        }
+      } else {
+        setPendingTestRun(null)
+        setPendingTestRunUnreadable(false)
+        setTestRunId(newTestRunId())
+      }
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ['kalshi-paper-test-runs', run.account_id] }),
+        queryClient.invalidateQueries({ queryKey: ['kalshi-paper-accounts'] }),
+        queryClient.invalidateQueries({ queryKey: ['kalshi-paper-decisions', run.account_id] }),
+        queryClient.invalidateQueries({ queryKey: ['kalshi-paper-positions', run.account_id] }),
+      ])
+    },
+  })
+  const controlTestRun = useMutation({
+    mutationFn: ({ runId, action }: { runId: string; action: 'pause' | 'resume' | 'stop' }) => {
+      if (action === 'pause') return pauseKalshiPaperTestRun(runId)
+      if (action === 'resume') return resumeKalshiPaperTestRun(runId)
+      return stopKalshiPaperTestRun(runId)
+    },
+    onSuccess: async ({ run }) => {
+      await queryClient.invalidateQueries({ queryKey: ['kalshi-paper-test-runs', run.account_id] })
     },
   })
   const cancelOrder = useMutation({
@@ -252,12 +399,15 @@ export default function KalshiPaperPanel() {
     localStorage.getItem(PENDING_CANCELLATION_KEY) !== null && pendingCancellation === null
   ) || (
     localStorage.getItem(PENDING_POSITION_EXIT_KEY) !== null && pendingPositionExit === null
-  )
+  ) || pendingTestRunUnreadable
   const inputFrozen = pendingAttempt !== null
     || pendingCancellation !== null
     || pendingPositionExit !== null
+    || pendingTestRun !== null
     || unreadableRetryState
-  const authoritativeError = Boolean(accountsQuery.error || ordersQuery.error || positionsQuery.error)
+  const authoritativeError = Boolean(
+    accountsQuery.error || ordersQuery.error || positionsQuery.error || testRunsQuery.error,
+  )
   const canEvaluate = Boolean(activeAccountId && eligibility && !authoritativeError)
     && !inputFrozen
     && !recordDecision.isPending
@@ -460,6 +610,212 @@ export default function KalshiPaperPanel() {
           </CardContent>
         </Card>
       </div>
+
+      <Card className="border-blue-500/30 bg-card/50 shadow-none">
+        <CardContent className="p-0">
+          <div className="border-b border-blue-500/30 bg-blue-500/5 px-3 py-2.5">
+            <p className="text-sm font-semibold text-blue-200">TEST TRADES — PAPER ONLY</p>
+            <p className="text-[11px] text-muted-foreground">
+              An operator-started paper BUY IOC is monitored against fresh public bids. No venue mutation is available.
+            </p>
+            <p className="mt-1 text-[11px] text-amber-200">
+              Stop leaves any residual paper position open; settlement and manual paper SELL actions remain separate.
+            </p>
+          </div>
+          <div className="space-y-3 p-3">
+            <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-5">
+              <div>
+                <label className="mb-1 block text-[10px] uppercase tracking-wider text-muted-foreground">Test quantity</label>
+                <Input
+                  aria-label="Test quantity"
+                  value={testQuantity}
+                  disabled={inputFrozen}
+                  onChange={(event) => setTestQuantity(event.target.value)}
+                  inputMode="decimal"
+                />
+              </div>
+              <div>
+                <label className="mb-1 block text-[10px] uppercase tracking-wider text-muted-foreground">Entry limit price</label>
+                <Input
+                  aria-label="Entry limit price"
+                  value={testEntryLimitPrice}
+                  disabled={inputFrozen}
+                  onChange={(event) => setTestEntryLimitPrice(event.target.value)}
+                  inputMode="decimal"
+                />
+              </div>
+              <div>
+                <label className="mb-1 block text-[10px] uppercase tracking-wider text-muted-foreground">Take profit bid</label>
+                <Input
+                  aria-label="Take profit bid"
+                  value={takeProfitPrice}
+                  disabled={inputFrozen}
+                  onChange={(event) => setTakeProfitPrice(event.target.value)}
+                  inputMode="decimal"
+                />
+              </div>
+              <div>
+                <label className="mb-1 block text-[10px] uppercase tracking-wider text-muted-foreground">Stop loss trigger bid</label>
+                <Input
+                  aria-label="Stop loss trigger bid"
+                  value={stopLossPrice}
+                  disabled={inputFrozen}
+                  onChange={(event) => setStopLossPrice(event.target.value)}
+                  inputMode="decimal"
+                />
+              </div>
+              <div>
+                <label className="mb-1 block text-[10px] uppercase tracking-wider text-muted-foreground">Stop loss minimum bid</label>
+                <Input
+                  aria-label="Stop loss minimum bid"
+                  value={stopLossMinimumPrice}
+                  disabled={inputFrozen}
+                  onChange={(event) => setStopLossMinimumPrice(event.target.value)}
+                  inputMode="decimal"
+                />
+              </div>
+            </div>
+            <div className="rounded-md border border-border/60 bg-background/50 p-2 text-[10px] text-muted-foreground">
+              Run ID: <span className="break-all font-mono text-foreground">{testRunId}</span>
+            </div>
+            {pendingTestRun ? (
+              <div className="rounded-md border border-amber-500/30 bg-amber-500/10 p-3 text-xs text-amber-200">
+                <p>Test-run start outcome unknown. The same run ID and immutable configuration are retained; no request is sent automatically.</p>
+                <Button
+                  className="mt-2"
+                  size="sm"
+                  disabled={startTestRun.isPending}
+                  onClick={() => startTestRun.mutate()}
+                >
+                  <RotateCcw className="mr-1.5 h-3.5 w-3.5" />
+                  Retry same immutable test run
+                </Button>
+              </div>
+            ) : (
+              <Button
+                disabled={
+                  inputFrozen
+                  || authoritativeError
+                  || !activeAccountId
+                  || !eligibility
+                  || startTestRun.isPending
+                  || !testQuantity
+                  || !testEntryLimitPrice
+                  || !takeProfitPrice
+                  || !stopLossPrice
+                  || !stopLossMinimumPrice
+                }
+                onClick={() => startTestRun.mutate()}
+              >
+                Start paper test run
+              </Button>
+            )}
+            {startTestRun.error && (
+              <p className="rounded-md border border-red-500/30 bg-red-500/10 p-2 text-xs text-red-200">
+                {errorMessage(startTestRun.error)} The same run ID and immutable configuration are retained for an explicit safe retry.
+              </p>
+            )}
+            {controlTestRun.error && (
+              <p className="rounded-md border border-red-500/30 bg-red-500/10 p-2 text-xs text-red-200">
+                {errorMessage(controlTestRun.error)}
+              </p>
+            )}
+          </div>
+          {testRunsQuery.error ? (
+            <p className="border-t border-border/60 p-4 text-xs text-amber-300">
+              Test-run refresh failed. Cached runs and events are hidden and controls are disabled until refresh recovers.
+            </p>
+          ) : (testRunsQuery.data?.length ?? 0) === 0 ? (
+            <p className="border-t border-border/60 p-6 text-center text-xs text-muted-foreground">
+              No paper test runs for this account.
+            </p>
+          ) : (
+            <div className="space-y-3 border-t border-border/60 p-3">
+              {(testRunsQuery.data ?? []).map(({ run, events }) => (
+                <div key={run.run_id} className="rounded-md border border-border/70 bg-background/50 p-3 text-xs">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div>
+                      <p className="font-mono">{run.ticker} {run.outcome.toUpperCase()}</p>
+                      <p className="break-all text-[10px] text-muted-foreground">{run.run_id}</p>
+                    </div>
+                    <div className="flex flex-wrap items-center gap-2">
+                      <Badge variant="outline" className={statusTone(run.status)}>{run.status}</Badge>
+                      {run.status === 'monitoring' && (
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          disabled={inputFrozen || controlTestRun.isPending}
+                          onClick={() => controlTestRun.mutate({ runId: run.run_id, action: 'pause' })}
+                        >
+                          Pause
+                        </Button>
+                      )}
+                      {run.status === 'paused' && (
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          disabled={inputFrozen || controlTestRun.isPending}
+                          onClick={() => controlTestRun.mutate({ runId: run.run_id, action: 'resume' })}
+                        >
+                          Resume
+                        </Button>
+                      )}
+                      {(run.status === 'monitoring' || run.status === 'paused') && (
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          disabled={inputFrozen || controlTestRun.isPending}
+                          onClick={() => controlTestRun.mutate({ runId: run.run_id, action: 'stop' })}
+                        >
+                          Stop monitoring
+                        </Button>
+                      )}
+                    </div>
+                  </div>
+                  <div className="mt-2 grid gap-1 font-mono sm:grid-cols-4">
+                    <span>entry max {run.entry_limit_price}</span>
+                    <span>TP {run.take_profit_price}</span>
+                    <span>SL {run.stop_loss_price}</span>
+                    <span>open {run.remaining_quantity}</span>
+                  </div>
+                  <p className="mt-1 text-muted-foreground">
+                    Realized P&amp;L ${run.realized_pnl} · {run.last_reason?.replace(/_/g, ' ') ?? 'no projection reason'}
+                  </p>
+                  {run.last_error && <p className="mt-1 text-red-300">{run.last_error}</p>}
+                  <div className="mt-3 overflow-auto">
+                    <table className="w-full min-w-[760px] text-[11px]">
+                      <thead className="border-b border-border/60 text-muted-foreground">
+                        <tr>
+                          <th className="py-1 text-left">Seq</th>
+                          <th className="py-1 text-left">Event</th>
+                          <th className="py-1 text-right">Best bid</th>
+                          <th className="py-1 text-right">Trigger</th>
+                          <th className="py-1 text-right">Remaining</th>
+                          <th className="py-1 text-left">Reason</th>
+                          <th className="py-1 text-left">Time</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {events.map((event) => (
+                          <tr key={`${event.run_id}:${event.sequence}`} className="border-b border-border/30">
+                            <td className="py-1 font-mono">{event.sequence}</td>
+                            <td className="py-1">{event.event_type.replace(/_/g, ' ')}</td>
+                            <td className="py-1 text-right font-mono">{event.best_bid ?? '—'}</td>
+                            <td className="py-1 text-right font-mono">{event.trigger_price ?? '—'}</td>
+                            <td className="py-1 text-right font-mono">{event.remaining_quantity ?? '—'}</td>
+                            <td className="py-1 text-muted-foreground">{event.reason?.replace(/_/g, ' ') ?? '—'}</td>
+                            <td className="py-1 text-muted-foreground">{new Date(event.created_at).toLocaleString()}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </CardContent>
+      </Card>
 
       <Card className="border-border bg-card/50 shadow-none">
         <CardContent className="p-0">
