@@ -76,3 +76,11 @@ def test_runbook_requires_both_railway_domain_records_and_private_backend():
     assert "DNS-only while Railway validates ownership" in runbook
     assert "Full (strict)" in runbook
     assert "Never expose the backend or database" in runbook
+
+
+def test_railway_upload_keeps_tracked_frontend_country_reference():
+    gitignore = _read(".gitignore")
+
+    assert "!frontend/src/data/" in gitignore
+    assert "!frontend/src/data/countryReference.json" in gitignore
+    assert (REPO_ROOT / "frontend/src/data/countryReference.json").is_file()

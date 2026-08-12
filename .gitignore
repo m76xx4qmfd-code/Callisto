@@ -52,6 +52,12 @@ backend/.runtime/
 !backend/data/
 !backend/data/*.json
 
+# Force-include the tracked frontend country reference used at TypeScript
+# build time. Railway CLI applies this ignore file to upload archives even
+# for tracked files, so omitting this exception breaks clean remote builds.
+!frontend/src/data/
+!frontend/src/data/countryReference.json
+
 # Local exports
 homerun-settings-*.json
 
