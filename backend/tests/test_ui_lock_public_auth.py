@@ -30,7 +30,7 @@ from services.ui_lock import (
 )
 from utils.passwords import hash_password, is_supported_password_hash
 
-ORIGIN = "https://europaterminal.ai"
+ORIGIN = "https://callistoterminal.ai"
 PASSWORD = "test-only-password"
 
 

@@ -69,13 +69,22 @@ def test_nginx_security_headers_and_backend_dynamic_port_are_wired():
 
 
 def test_runbook_requires_both_railway_domain_records_and_private_backend():
-    runbook = _read("docs/deployment/EUROPA_TERMINAL_RAILWAY.md")
+    runbook = _read("docs/deployment/CALLISTO_TERMINAL_RAILWAY.md")
 
     assert "CNAME routing target and a TXT verification record" in runbook
     assert "Create **both** records" in runbook
     assert "DNS-only while Railway validates ownership" in runbook
     assert "Full (strict)" in runbook
     assert "Never expose the backend or database" in runbook
+    assert "https://callistoterminal.ai" in runbook
+    assert "europaterminal.ai" not in runbook
+
+
+def test_backend_canonical_origin_is_callisto_terminal_only():
+    main = _read("backend/main.py")
+
+    assert 'settings.PUBLIC_APP_ORIGIN != "https://callistoterminal.ai"' in main
+    assert "europaterminal.ai" not in main
 
 
 def test_railway_upload_keeps_tracked_frontend_country_reference():

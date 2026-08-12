@@ -1,6 +1,6 @@
-# Europa Terminal on Railway
+# Callisto Terminal on Railway
 
-Europa Terminal is a dedicated public deployment of Callisto. Use a separate Railway project with three services:
+Callisto Terminal is a dedicated public deployment of Callisto. Use a separate Railway project with three services:
 
 - **frontend** — public Railway service and the only service assigned a public domain.
 - **backend** — private Railway service reachable only through Railway private networking.
@@ -18,8 +18,8 @@ Set these variables on the backend service:
 - `PUBLIC_AUTH_ENABLED=true`
 - `PUBLIC_AUTH_PASSWORD_HASH` — generated hash described below; never store the plaintext password.
 - `PUBLIC_AUTH_IDLE_TIMEOUT_MINUTES=60` (or another operator-approved value; the app clamps it to 1–1440).
-- `PUBLIC_APP_ORIGIN=https://europaterminal.ai`
-- `CORS_ORIGINS=["https://europaterminal.ai"]`
+- `PUBLIC_APP_ORIGIN=https://callistoterminal.ai`
+- `CORS_ORIGINS=["https://callistoterminal.ai"]`
 - `REDIS_ENABLED=false` unless a separately reviewed private Redis service is added.
 
 Railway supplies `PORT`; the backend Docker image reads it dynamically. Do **not** configure Polymarket, Kalshi, wallet, exchange, signing, venue API, or private-key variables.
@@ -41,7 +41,7 @@ Run this locally from the repository's `backend` directory. The password is ente
 python - <<'PY'
 from getpass import getpass
 from utils.passwords import hash_password
-password = getpass("Europa Terminal password: ")
+password = getpass("Callisto Terminal password: ")
 confirmation = getpass("Confirm password: ")
 if password != confirmation:
     raise SystemExit("Passwords do not match")
@@ -62,7 +62,7 @@ Copy only the resulting hash to Railway's `PUBLIC_AUTH_PASSWORD_HASH` variable. 
 
 ## Cloudflare and DNS
 
-Attach `europaterminal.ai` only to the frontend Railway service. Railway returns two ownership records for the custom domain: a CNAME routing target and a TXT verification record. Create **both** records in Cloudflare exactly as Railway returns them; Railway will return 404 until the TXT ownership record is present and verified.
+Attach `callistoterminal.ai` only to the frontend Railway service. Railway returns two ownership records for the custom domain: a CNAME routing target and a TXT verification record. Create **both** records in Cloudflare exactly as Railway returns them; Railway will return 404 until the TXT ownership record is present and verified.
 
 Keep the verification TXT record DNS-only. Begin the CNAME as DNS-only while Railway validates ownership and provisions its origin certificate. After Railway reports the domain and certificate healthy, enable the Cloudflare proxy and set SSL/TLS mode to **Full (strict)**. Keep HTTPS enabled end to end. Never expose the backend or database through Cloudflare or a Railway public domain.
 

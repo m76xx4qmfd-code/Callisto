@@ -298,9 +298,9 @@ async def lifespan(app: FastAPI):
             raise RuntimeError(
                 "PUBLIC_AUTH_PASSWORD_HASH is required and must use the current supported parameters."
             )
-        if settings.PUBLIC_APP_ORIGIN != "https://europaterminal.ai":
+        if settings.PUBLIC_APP_ORIGIN != "https://callistoterminal.ai":
             raise RuntimeError(
-                "PUBLIC_APP_ORIGIN must be exactly https://europaterminal.ai when public auth is enabled."
+                "PUBLIC_APP_ORIGIN must be exactly https://callistoterminal.ai when public auth is enabled."
             )
 
     # Create a shared thread pool executor for CPU-bound work so that
