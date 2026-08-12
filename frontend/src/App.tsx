@@ -480,7 +480,7 @@ function App() {
   const uiLockTimeoutMinutes = uiLockStatus?.idle_timeout_minutes ?? 15
   const uiLocked = localUiLocked || Boolean(uiLockStatus?.locked)
   const uiLockStatusResolved = typeof uiLockStatus !== 'undefined'
-  const uiLockOverlayVisible = uiLockStatusResolved ? uiLocked : false
+  const uiLockOverlayVisible = !uiLockStatusResolved || uiLocked
 
   const handleForceLock = useCallback(() => {
     if (!uiLockEnabled || idleLockTriggeredRef.current) return

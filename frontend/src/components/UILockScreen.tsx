@@ -90,9 +90,9 @@ export default function UILockScreen({
                   <Lock className="h-5 w-5 text-emerald-300" />
                 </div>
                 <div>
-                  <h2 className="text-lg font-semibold text-slate-100">{t('uiLockScreen.title')}</h2>
+                  <h2 className="text-lg font-semibold text-slate-100">Europa Terminal</h2>
                   <p className="text-xs text-slate-400">
-                    {t('uiLockScreen.inactivityTimeout', { count: timeoutMinutes })}
+                    Secure access · {t('uiLockScreen.inactivityTimeout', { count: timeoutMinutes })}
                   </p>
                 </div>
               </div>
@@ -123,6 +123,17 @@ export default function UILockScreen({
                   </Button>
                 </form>
               )}
+              <p className="mt-5 text-center text-[11px] text-slate-500">
+                Callisto is AGPL-3.0 ·{' '}
+                <a
+                  href="https://github.com/m76xx4qmfd-code/Callisto"
+                  target="_blank"
+                  rel="noreferrer"
+                  className="text-emerald-300 hover:text-emerald-200"
+                >
+                  Source
+                </a>
+              </p>
             </motion.div>
           </div>
         </motion.div>

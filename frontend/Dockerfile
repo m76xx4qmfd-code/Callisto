@@ -26,7 +26,11 @@ RUN npm run build
 # ---------- runtime ----------------------------------------------------------
 FROM nginx:${NGINX_VERSION} AS runtime
 
-COPY nginx.conf /etc/nginx/conf.d/default.conf
+ENV PORT=3000 \
+    BACKEND_HOST=backend \
+    BACKEND_PORT=8000
+
+COPY nginx.conf /etc/nginx/templates/default.conf.template
 COPY --from=builder /build/dist /usr/share/nginx/html
 
 EXPOSE 3000

@@ -65,6 +65,41 @@ def hash_password(password: str) -> str:
         return _hash_with_pbkdf2(normalized)
 
 
+def is_supported_password_hash(encoded_hash: str | None) -> bool:
+    """Return whether a hash uses exactly the parameters generated today."""
+    if not encoded_hash:
+        return False
+    parts = str(encoded_hash).split("$")
+    try:
+        if len(parts) == 6 and parts[0] == SCHEME_SCRYPT:
+            _, n_raw, r_raw, p_raw, salt_b64, digest_b64 = parts
+            salt = _decode_b64(salt_b64)
+            digest = _decode_b64(digest_b64)
+            return (
+                n_raw == str(SCRYPT_N)
+                and r_raw == str(SCRYPT_R)
+                and p_raw == str(SCRYPT_P)
+                and len(salt) == SALT_LEN_BYTES
+                and len(digest) == SCRYPT_DKLEN
+                and _encode_b64(salt) == salt_b64
+                and _encode_b64(digest) == digest_b64
+            )
+        if len(parts) == 4 and parts[0] == SCHEME_PBKDF2:
+            _, iterations_raw, salt_b64, digest_b64 = parts
+            salt = _decode_b64(salt_b64)
+            digest = _decode_b64(digest_b64)
+            return (
+                iterations_raw == str(PBKDF2_ITERATIONS)
+                and len(salt) == SALT_LEN_BYTES
+                and len(digest) == PBKDF2_DKLEN
+                and _encode_b64(salt) == salt_b64
+                and _encode_b64(digest) == digest_b64
+            )
+    except (TypeError, ValueError):
+        return False
+    return False
+
+
 def verify_password(password: str, encoded_hash: str | None) -> bool:
     if not encoded_hash:
         return False

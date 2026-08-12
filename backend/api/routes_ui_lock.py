@@ -4,9 +4,31 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
-from services.ui_lock import UI_LOCK_SESSION_COOKIE, ui_lock_service
+from config import settings
+from services.ui_lock import UILockRateLimited, UI_LOCK_SESSION_COOKIE, ui_lock_service
 
 router = APIRouter(tags=["UI Lock"])
+
+_PUBLIC_UI_LOCK_PATHS = {"/api/ui-lock/status", "/api/ui-lock/unlock"}
+
+
+def requires_ui_auth(path: str) -> bool:
+    normalized = str(path or "")
+    if normalized in _PUBLIC_UI_LOCK_PATHS:
+        return False
+    return normalized.startswith(("/api", "/mcp", "/ws"))
+
+
+def _client_key(request: Request) -> str:
+    cloudflare_ip = request.headers.get("cf-connecting-ip", "").strip()
+    if cloudflare_ip:
+        return cloudflare_ip
+    forwarded = request.headers.get("x-forwarded-for", "")
+    if forwarded:
+        last_hop = forwarded.split(",")[-1].strip()
+        if last_hop:
+            return last_hop
+    return request.client.host if request.client else "unknown"
 
 
 class UILockStatusResponse(BaseModel):
@@ -30,7 +52,17 @@ async def get_ui_lock_status(request: Request):
 @router.post("/ui-lock/unlock")
 async def unlock_ui(request: Request, payload: UnlockRequest):
     password = str(payload.password or "")
-    success, token, message = await ui_lock_service.unlock(password=password)
+    try:
+        success, token, message = await ui_lock_service.unlock(
+            password=password,
+            client_key=_client_key(request),
+        )
+    except UILockRateLimited as exc:
+        raise HTTPException(
+            status_code=429,
+            detail=str(exc),
+            headers={"Retry-After": "900"},
+        ) from exc
     if not success:
         raise HTTPException(status_code=401, detail=message)
 
@@ -46,8 +78,8 @@ async def unlock_ui(request: Request, payload: UnlockRequest):
             key=UI_LOCK_SESSION_COOKIE,
             value=token,
             httponly=True,
-            secure=request.url.scheme == "https",
-            samesite="lax",
+            secure=True if settings.PUBLIC_AUTH_ENABLED else request.url.scheme == "https",
+            samesite="strict" if settings.PUBLIC_AUTH_ENABLED else "lax",
             max_age=30 * 24 * 60 * 60,
             path="/",
         )
