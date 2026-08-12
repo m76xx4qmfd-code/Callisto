@@ -317,6 +317,10 @@ class Settings(BaseSettings):
     # Production Settings
     LOG_LEVEL: str = "INFO"
     CORS_ORIGINS: list[str] = ["*"]
+    PUBLIC_AUTH_ENABLED: bool = False
+    PUBLIC_AUTH_PASSWORD_HASH: Optional[str] = None
+    PUBLIC_AUTH_IDLE_TIMEOUT_MINUTES: int = 60
+    PUBLIC_APP_ORIGIN: Optional[str] = None
 
     # Simulation Defaults
     DEFAULT_SIMULATION_CAPITAL: float = 10000.0

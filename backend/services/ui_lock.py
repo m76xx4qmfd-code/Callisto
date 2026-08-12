@@ -8,11 +8,18 @@ from typing import Optional
 
 from sqlalchemy import select
 
+from config import settings
 from models.database import AppSettings, AsyncSessionLocal
-from utils.passwords import verify_password
+from utils.passwords import is_supported_password_hash, verify_password
 from utils.utcnow import utcnow
 
 UI_LOCK_SESSION_COOKIE = "homerun_ui_lock_session"
+FAILED_UNLOCK_LIMIT = 5
+FAILED_UNLOCK_WINDOW_SECONDS = 15 * 60
+
+
+class UILockRateLimited(Exception):
+    """Raised when a client has exhausted its public unlock attempts."""
 
 
 @dataclass
@@ -36,6 +43,9 @@ class UILockService:
 
         self._sessions_lock = asyncio.Lock()
         self._sessions: dict[str, UILockSession] = {}
+
+        self._failed_unlocks_lock = asyncio.Lock()
+        self._failed_unlocks: dict[str, list[float]] = {}
 
     def mark_settings_dirty(self) -> None:
         self._settings_loaded_at_monotonic = 0.0
@@ -65,6 +75,19 @@ class UILockService:
         )
 
     async def get_settings(self, *, force_refresh: bool = False) -> UILockSettingsSnapshot:
+        if settings.PUBLIC_AUTH_ENABLED:
+            password_hash = settings.PUBLIC_AUTH_PASSWORD_HASH
+            if not password_hash:
+                raise RuntimeError("PUBLIC_AUTH_PASSWORD_HASH is required when public auth is enabled.")
+            if not is_supported_password_hash(password_hash):
+                raise RuntimeError("PUBLIC_AUTH_PASSWORD_HASH is malformed or uses unsupported parameters.")
+            timeout_minutes = max(1, min(int(settings.PUBLIC_AUTH_IDLE_TIMEOUT_MINUTES), 24 * 60))
+            return UILockSettingsSnapshot(
+                enabled=True,
+                idle_timeout_minutes=timeout_minutes,
+                password_hash=password_hash,
+            )
+
         now_monotonic = asyncio.get_running_loop().time()
         if (
             not force_refresh
@@ -128,14 +151,33 @@ class UILockService:
             "has_password": bool(settings.password_hash),
         }
 
-    async def unlock(self, password: str) -> tuple[bool, str | None, str]:
+    async def unlock(self, password: str, client_key: str = "unknown") -> tuple[bool, str | None, str]:
         settings = await self.get_settings(force_refresh=True)
         if not settings.enabled:
             return True, None, "UI lock is disabled."
         if not settings.password_hash:
             return False, None, "UI lock password is not configured."
-        if not verify_password(password, settings.password_hash):
+        key = str(client_key or "unknown")
+        now_monotonic = asyncio.get_running_loop().time()
+        async with self._failed_unlocks_lock:
+            failures = [
+                timestamp
+                for timestamp in self._failed_unlocks.get(key, [])
+                if now_monotonic - timestamp < FAILED_UNLOCK_WINDOW_SECONDS
+            ]
+            if len(failures) >= FAILED_UNLOCK_LIMIT:
+                self._failed_unlocks[key] = failures
+                raise UILockRateLimited("Too many failed unlock attempts.")
+            # Reserve the attempt before leaving the lock for password hashing.
+            failures.append(now_monotonic)
+            self._failed_unlocks[key] = failures
+
+        verified = await asyncio.to_thread(verify_password, password, settings.password_hash)
+        if not verified:
             return False, None, "Incorrect password."
+
+        async with self._failed_unlocks_lock:
+            self._failed_unlocks.pop(key, None)
 
         token = secrets.token_urlsafe(32)
         now = utcnow()

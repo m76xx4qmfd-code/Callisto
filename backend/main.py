@@ -61,7 +61,7 @@ from api.routes_admin import router as admin_router
 from api.routes_maintenance import router as maintenance_router
 from api.routes_operator import router as operator_router
 from api.routes_settings import router as settings_router
-from api.routes_ui_lock import router as ui_lock_router
+from api.routes_ui_lock import requires_ui_auth, router as ui_lock_router
 from api.routes_ai import router as ai_router
 from api.routes_news import router as news_router
 from api.routes_discovery import discovery_router
@@ -114,6 +114,7 @@ from services.worker_state import list_worker_snapshots, read_worker_control, su
 from services.ui_lock import UI_LOCK_SESSION_COOKIE, ui_lock_service
 from utils.logger import setup_logging, get_logger
 from utils.rate_limiter import rate_limiter, TokenBucket
+from utils.passwords import is_supported_password_hash
 
 register_all_models()
 
@@ -291,6 +292,16 @@ async def _reset_orchestrator_boot_state() -> None:
 async def lifespan(app: FastAPI):
     """Startup and shutdown events"""
     logger.info("Starting Autonomous Prediction Market Trading Platform...")
+
+    if settings.PUBLIC_AUTH_ENABLED:
+        if not is_supported_password_hash(settings.PUBLIC_AUTH_PASSWORD_HASH):
+            raise RuntimeError(
+                "PUBLIC_AUTH_PASSWORD_HASH is required and must use the current supported parameters."
+            )
+        if settings.PUBLIC_APP_ORIGIN != "https://callistoterminal.ai":
+            raise RuntimeError(
+                "PUBLIC_APP_ORIGIN must be exactly https://callistoterminal.ai when public auth is enabled."
+            )
 
     # Create a shared thread pool executor for CPU-bound work so that
     # heavy background tasks (strategy detection, ML embedding, wallet
@@ -1060,20 +1071,17 @@ app.add_middleware(
 )
 
 
-_UI_LOCK_EXEMPT_API_PATHS = {
-    "/api/ui-lock/status",
-    "/api/ui-lock/unlock",
-    "/api/ui-lock/lock",
-    "/api/ui-lock/activity",
-}
-
-
 @app.middleware("http")
 async def ui_lock_guard(request: Request, call_next):
     path = request.url.path
-    if not path.startswith("/api"):
-        return await call_next(request)
-    if path in _UI_LOCK_EXEMPT_API_PATHS:
+    if settings.PUBLIC_AUTH_ENABLED and request.method.upper() not in {"GET", "HEAD", "OPTIONS"}:
+        if request.headers.get("origin") != settings.PUBLIC_APP_ORIGIN:
+            return JSONResponse(
+                status_code=403,
+                content={"detail": "Cross-origin request denied.", "code": "origin_denied"},
+            )
+
+    if not requires_ui_auth(path):
         return await call_next(request)
 
     token = request.cookies.get(UI_LOCK_SESSION_COOKIE)
@@ -1085,7 +1093,7 @@ async def ui_lock_guard(request: Request, call_next):
                 status_code=423,
                 content={
                     "detail": "UI lock is active.",
-                    "code": "ui_locked",
+                    "code": "auth-required" if settings.PUBLIC_AUTH_ENABLED else "ui_locked",
                     "ui_lock": status,
                 },
             )
@@ -1193,6 +1201,9 @@ except Exception as _mcp_exc:  # pragma: no cover — MCP is optional
 # WebSocket endpoint
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
+    if settings.PUBLIC_AUTH_ENABLED and websocket.headers.get("origin") != settings.PUBLIC_APP_ORIGIN:
+        await websocket.close(code=4403)
+        return
     token = websocket.cookies.get(UI_LOCK_SESSION_COOKIE)
     unlocked = await ui_lock_service.is_token_unlocked(token)
     if not unlocked:
