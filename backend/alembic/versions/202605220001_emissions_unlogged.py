@@ -28,6 +28,7 @@ emission.
 """
 
 from alembic import op
+import sqlalchemy as sa
 
 
 revision = "202605220001"
@@ -36,9 +37,24 @@ branch_labels = None
 depends_on = None
 
 
+def _relkind() -> str | None:
+    return op.get_bind().execute(
+        sa.text(
+            "SELECT relkind::text FROM pg_class "
+            "WHERE relname = 'trade_signal_emissions'"
+        )
+    ).scalar()
+
+
 def upgrade() -> None:
-    op.execute("ALTER TABLE trade_signal_emissions SET UNLOGGED")
+    # Fresh base-to-head replays lazily pre-create the current partitioned
+    # schema. PostgreSQL cannot mark a partitioned parent UNLOGGED, while a
+    # real legacy database at this revision still has the historical plain
+    # table and must retain the original migration behavior.
+    if _relkind() == "r":
+        op.execute("ALTER TABLE trade_signal_emissions SET UNLOGGED")
 
 
 def downgrade() -> None:
-    op.execute("ALTER TABLE trade_signal_emissions SET LOGGED")
+    if _relkind() == "r":
+        op.execute("ALTER TABLE trade_signal_emissions SET LOGGED")

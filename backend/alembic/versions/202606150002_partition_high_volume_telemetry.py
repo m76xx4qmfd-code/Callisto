@@ -42,12 +42,19 @@ branch_labels = None
 depends_on = None
 
 
-# name -> (unlogged?, optional FK tuple (constraint_name, col, ref_table, ref_col))
+# PostgreSQL rejects UNLOGGED partitioned parents.  ``downgrade_unlogged``
+# preserves the historical plain-table persistence only when rolling back.
 _TABLES = (
-    {"name": "trade_signal_emissions", "unlogged": True, "fk": None},
+    {
+        "name": "trade_signal_emissions",
+        "partition_unlogged": False,
+        "downgrade_unlogged": True,
+        "fk": None,
+    },
     {
         "name": "trader_decision_checks",
-        "unlogged": False,
+        "partition_unlogged": False,
+        "downgrade_unlogged": False,
         "fk": ("trader_decision_checks_decision_id_fkey", "decision_id", "trader_decisions", "id"),
     },
 )
@@ -104,7 +111,7 @@ def upgrade() -> None:
         if _relkind(bind, table) != "r":
             # Already partitioned (fresh-install / replay path) -> no-op.
             continue
-        persist = "UNLOGGED " if cfg["unlogged"] else ""
+        persist = "UNLOGGED " if cfg["partition_unlogged"] else ""
         old = f"{table}__pre_partition"
 
         index_defs = _secondary_index_defs(bind, table)
@@ -159,7 +166,7 @@ def downgrade() -> None:
         if _relkind(bind, table) != "p":
             # Not partitioned -> nothing to revert.
             continue
-        persist = "UNLOGGED " if cfg["unlogged"] else ""
+        persist = "UNLOGGED " if cfg["downgrade_unlogged"] else ""
         old = f"{table}__partitioned"
 
         index_defs = _secondary_index_defs(bind, table)
