@@ -38,6 +38,73 @@ if str(BACKEND_ROOT) not in sys.path:
     sys.path.insert(0, str(BACKEND_ROOT))
 
 
+def test_partitioned_telemetry_parent_ddl_is_logged() -> None:
+    """PostgreSQL rejects partitioned parents declared as UNLOGGED."""
+    from sqlalchemy.dialects import postgresql
+    from sqlalchemy.schema import CreateTable
+
+    from models.database import TradeSignalEmission
+
+    ddl = str(
+        CreateTable(TradeSignalEmission.__table__).compile(
+            dialect=postgresql.dialect()
+        )
+    ).upper()
+
+    assert "PARTITION BY RANGE (CREATED_AT)" in ddl
+    assert "CREATE UNLOGGED TABLE" not in ddl
+
+
+def test_partition_cutover_never_requests_unlogged_partitioned_parent() -> None:
+    """The migration's partitioned parents and children must be logged."""
+    import importlib.util
+
+    path = (
+        BACKEND_ROOT
+        / "alembic"
+        / "versions"
+        / "202606150002_partition_high_volume_telemetry.py"
+    )
+    spec = importlib.util.spec_from_file_location("partition_telemetry_migration", path)
+    assert spec is not None and spec.loader is not None
+    migration = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(migration)
+
+    assert all(not table["partition_unlogged"] for table in migration._TABLES)
+    trade_emissions = next(
+        table
+        for table in migration._TABLES
+        if table["name"] == "trade_signal_emissions"
+    )
+    assert trade_emissions["downgrade_unlogged"] is True
+
+
+def test_historical_unlogged_migration_skips_partitioned_parent(monkeypatch) -> None:
+    """Fresh replays pre-create the current partitioned schema at baseline."""
+    import importlib.util
+
+    path = (
+        BACKEND_ROOT
+        / "alembic"
+        / "versions"
+        / "202605220001_emissions_unlogged.py"
+    )
+    spec = importlib.util.spec_from_file_location("emissions_unlogged_migration", path)
+    assert spec is not None and spec.loader is not None
+    migration = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(migration)
+
+    statements: list[str] = []
+    monkeypatch.setattr(migration, "_relkind", lambda: "p")
+    monkeypatch.setattr(migration.op, "execute", statements.append)
+    migration.upgrade()
+    assert statements == []
+
+    monkeypatch.setattr(migration, "_relkind", lambda: "r")
+    migration.upgrade()
+    assert statements == ["ALTER TABLE trade_signal_emissions SET UNLOGGED"]
+
+
 def test_runtime_snapshot_lag_type_matches_migration() -> None:
     from sqlalchemy import Numeric
 

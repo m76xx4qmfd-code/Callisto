@@ -17,8 +17,16 @@ from datetime import datetime, timedelta, timezone
 import pytest
 from sqlalchemy import Column, DateTime, MetaData, String, Table, text
 
-from services.maintenance import maintenance_service
+from services.maintenance import _PARTITIONED_TELEMETRY, maintenance_service
 from tests.postgres_test_db import build_postgres_session_factory
+
+
+def test_runtime_partition_contract_keeps_all_telemetry_logged() -> None:
+    """Runtime maintenance must not reintroduce crash-truncated children."""
+    assert _PARTITIONED_TELEMETRY == (
+        ("trade_signal_emissions", False),
+        ("trader_decision_checks", False),
+    )
 
 
 @pytest.mark.db
@@ -61,6 +69,13 @@ async def test_partition_lifecycle_create_drain_drop_route() -> None:
         async with Session() as s:
             assert await s.scalar(text(f"SELECT count(*) FROM {pname}")) == 1
             assert await s.scalar(text("SELECT count(*) FROM part_smoke_default")) == 0
+            assert (
+                await s.scalar(
+                    text("SELECT relpersistence::text FROM pg_class WHERE relname = :p"),
+                    {"p": pname},
+                )
+                == "p"
+            )
 
         # 3) An old partition + row is dropped by drop-expired; today's is kept.
         old = today - timedelta(days=30)

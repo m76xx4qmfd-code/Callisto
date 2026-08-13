@@ -35,8 +35,11 @@ logger = get_logger("maintenance")
 # Telemetry tables converted to native daily RANGE partitioning (see the
 # partition hook in models.database + migration 202606150002).  Retention for
 # these is DROP PARTITION via ``maintain_partitions`` — never DELETE.
+# PostgreSQL 18 rejects UNLOGGED partitioned parents, and mixed-persistence
+# children would be crash-truncated even under a logged parent.  Keep every
+# runtime-created telemetry partition permanent/logged to match ORM + Alembic.
 _PARTITIONED_TELEMETRY = (
-    ("trade_signal_emissions", True),    # (table, unlogged)
+    ("trade_signal_emissions", False),    # (table, unlogged child)
     ("trader_decision_checks", False),
 )
 _PARTITION_AHEAD_DAYS = 3
