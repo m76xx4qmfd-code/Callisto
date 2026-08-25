@@ -1,0 +1,2 @@
+export const CALLISTO_BUILD_ID = import.meta.env.VITE_CALLISTO_BUILD_ID
+export const CALLISTO_BUILD_LABEL = `BUILD ${CALLISTO_BUILD_ID}`

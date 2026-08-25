@@ -121,6 +121,7 @@ import SearchFiltersFlyout from './components/SearchFiltersFlyout'
 import CryptoSettingsFlyout from './components/CryptoSettingsFlyout'
 import NewsWorkflowSettingsFlyout from './components/NewsWorkflowSettingsFlyout'
 import AccountModeSelector from './components/AccountModeSelector'
+import { BuildIdentity } from './components/BuildIdentity'
 import NewsIntelligencePanel from './components/NewsIntelligencePanel'
 import CryptoMarketsPanel from './components/CryptoMarketsPanel'
 import WeatherOpportunitiesPanel from './components/WeatherOpportunitiesPanel'
@@ -1819,7 +1820,7 @@ function App() {
             <div className="w-7 h-7 bg-green-500/15 rounded-lg flex items-center justify-center border border-green-500/20">
               <Terminal className="w-4 h-4 text-green-400" />
             </div>
-            <span className="text-sm font-bold text-green-400 tracking-wider font-data">CALLISTO</span>
+            <BuildIdentity />
           </div>
 
           <AccountModeSelector />

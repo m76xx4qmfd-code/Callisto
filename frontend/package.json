@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
+    "test:build-identity": "vitest run scripts/build-identity.test.tsx --environment jsdom",
     "test:kalshi-portfolio-component": "vite-node scripts/test-kalshi-portfolio-component.tsx",
     "test:kalshi-portfolio-wire": "vite-node scripts/test-kalshi-portfolio-wire.mjs",
     "test:kalshi-paper-wire": "vite-node scripts/test-kalshi-paper-wire.mjs",
