@@ -20,9 +20,13 @@ logger.error = (msg, options) => {
 const vitePort = Number(process.env.VITE_PORT || 5173)
 const viteStrictPort = String(process.env.VITE_STRICT_PORT || "").toLowerCase() === "true"
 const viteHost = process.env.VITE_HOST || undefined
+const callistoBuildId = `${new Date().toISOString().replace('T', ' ').slice(0, 16)} UTC`
 
 export default defineConfig({
   plugins: [react()],
+  define: {
+    'import.meta.env.VITE_CALLISTO_BUILD_ID': JSON.stringify(callistoBuildId),
+  },
   customLogger: logger,
   optimizeDeps: {
     esbuildOptions: {
