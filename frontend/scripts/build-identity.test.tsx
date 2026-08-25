@@ -18,6 +18,7 @@ describe('BuildIdentity', () => {
     const buildLabel = screen.getByText(/BUILD \d{4}-\d{2}-\d{2} \d{2}:\d{2} UTC/)
     expect(wordmark.parentElement).toBe(identity)
     expect(buildLabel.parentElement).toBe(identity)
+    expect(buildLabel.className).toContain('text-[9px]')
     expect(identity.className).toContain('flex-col')
   })
 })
