@@ -140,6 +140,16 @@ def _required_text(payload: Mapping[str, object], key: str, *, context: str) -> 
     return value.strip()
 
 
+def _required_text_allow_empty(payload: Mapping[str, object], key: str, *, context: str) -> str:
+    try:
+        value = payload[key]
+    except KeyError as exc:
+        raise KalshiProtocolError(f"{key} is required in the Kalshi {context} response") from exc
+    if not isinstance(value, str) or (value and not value.strip()):
+        raise KalshiProtocolError(f"{key} must be a string and cannot contain only whitespace")
+    return value.strip()
+
+
 def _optional_text(payload: Mapping[str, object], key: str) -> str | None:
     value = payload.get(key)
     if value is None:
@@ -363,7 +373,9 @@ class KalshiOrder:
         return cls(
             order_id=_required_text(payload, "order_id", context="order"),
             user_id=_required_text(payload, "user_id", context="order"),
-            client_order_id=_required_text(payload, "client_order_id", context="order"),
+            # Kalshi's Order schema does not impose minLength, and historical
+            # orders created outside the API can carry the exact empty string.
+            client_order_id=_required_text_allow_empty(payload, "client_order_id", context="order"),
             ticker=_required_text(payload, "ticker", context="order"),
             outcome_side=cast(Literal["yes", "no"], outcome_side),
             book_side=cast(BookSide, book_side),

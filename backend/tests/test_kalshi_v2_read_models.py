@@ -63,6 +63,26 @@ def _order_payload() -> dict[str, object]:
     }
 
 
+def test_order_accepts_empty_venue_client_order_id_but_rejects_invalid_types() -> None:
+    payload = _order_payload()
+    payload["client_order_id"] = ""
+
+    order = KalshiOrder.from_payload(payload)
+
+    assert order.client_order_id == ""
+
+    for invalid in (None, 123, True, "   "):
+        invalid_payload = _order_payload()
+        invalid_payload["client_order_id"] = invalid
+        with pytest.raises(KalshiProtocolError, match="client_order_id"):
+            KalshiOrder.from_payload(invalid_payload)
+
+    missing_payload = _order_payload()
+    del missing_payload["client_order_id"]
+    with pytest.raises(KalshiProtocolError, match="client_order_id"):
+        KalshiOrder.from_payload(missing_payload)
+
+
 def _fill_payload() -> dict[str, object]:
     return {
         "fill_id": "fill-1",
