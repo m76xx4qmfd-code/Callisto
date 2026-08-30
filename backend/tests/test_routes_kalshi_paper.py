@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock
 
 import pytest
@@ -9,6 +10,11 @@ from sqlalchemy.exc import OperationalError
 
 from api import routes_kalshi_paper
 from api.routes_kalshi_paper import (
+    ConfirmedYesReversalCandleRequest,
+    ConfirmedYesReversalEvaluationRequest,
+    ConfirmedYesReversalMarketRequest,
+    ConfirmedYesReversalScheduleRequest,
+    ConfirmedYesReversalSettlementRequest,
     CreatePaperAccountRequest,
     PaperCancellationRequest,
     PaperDecisionRequest,
@@ -308,3 +314,96 @@ async def test_paper_test_run_route_maps_retryable_database_error(monkeypatch) -
         await routes_kalshi_paper.start_paper_test_run(request)
     assert retryable.value.status_code == 503
     assert "retry" in str(retryable.value.detail).lower()
+
+
+def _confirmed_yes_reversal_request() -> ConfirmedYesReversalEvaluationRequest:
+    call = datetime(2026, 9, 1, 14, 0, tzinfo=timezone.utc)
+    candles = [
+        ConfirmedYesReversalCandleRequest(
+            end_time=call - timedelta(hours=60), yes_bid="0.490000", yes_ask="0.510000", volume="1.00"
+        ),
+        ConfirmedYesReversalCandleRequest(
+            end_time=call - timedelta(hours=48), yes_bid="0.240000", yes_ask="0.260000", volume="5.00"
+        ),
+        ConfirmedYesReversalCandleRequest(
+            end_time=call - timedelta(hours=47), yes_bid="0.260000", yes_ask="0.280000", volume="3.00"
+        ),
+        ConfirmedYesReversalCandleRequest(
+            end_time=call - timedelta(hours=1), yes_bid="0.400000", yes_ask="0.420000", volume="2.00"
+        ),
+    ]
+    return ConfirmedYesReversalEvaluationRequest(
+        schedule=ConfirmedYesReversalScheduleRequest(
+            call_start=call,
+            published_at=call - timedelta(days=30),
+            observed_at=call - timedelta(days=20),
+            source_url="https://investor.example.test/call",
+            source_content_sha256="a" * 64,
+        ),
+        markets=[
+            ConfirmedYesReversalMarketRequest(
+                ticker="KXEARNINGSMENTIONTEST-26SEP01-WORD",
+                market_open=call - timedelta(days=40),
+                market_close=call + timedelta(hours=2),
+                settlement=ConfirmedYesReversalSettlementRequest(
+                    result="yes",
+                    observed_at=call + timedelta(hours=3),
+                    source_url="https://external-api.kalshi.com/trade-api/v2/markets/test",
+                    evidence_sha256="b" * 64,
+                    final=True,
+                ),
+                candles=candles,
+            )
+        ],
+    )
+
+
+def test_confirmed_yes_reversal_request_is_strict_and_has_no_execution_fields() -> None:
+    request = _confirmed_yes_reversal_request()
+    assert request.markets[0].candles[0].yes_bid == "0.490000"
+    payload = request.model_dump()
+    payload["account_id"] = "must-not-be-accepted"
+    with pytest.raises(ValidationError, match="extra_forbidden"):
+        ConfirmedYesReversalEvaluationRequest.model_validate(payload)
+
+
+def test_confirmed_yes_reversal_specification_route_is_explicitly_paper_only() -> None:
+    result = routes_kalshi_paper.get_confirmed_yes_reversal_specification()
+    assert result["strategy_id"] == "strategy_1_max_roi_confirmed_yes_reversal"
+    assert result["version"] == 1
+    assert result["execution_authority"] == "paper_only"
+    assert result["live_exchange_writes"] == "prohibited"
+
+
+def test_confirmed_yes_reversal_evaluation_route_returns_selected_paper_evidence() -> None:
+    result = routes_kalshi_paper.evaluate_confirmed_yes_reversal(_confirmed_yes_reversal_request())
+    assert result["schema_version"] == "confirmed-yes-reversal-evaluation/v1"
+    assert len(result["request_sha256"]) == 64
+    assert result["selected_count"] == 1
+    assert result["abstained_count"] == 0
+    assert result["decisions"][0]["entry_price"] == "0.280000"
+    assert result["decisions"][0]["execution_authority"] == "paper_only"
+
+
+def test_confirmed_yes_reversal_evaluation_cannot_reach_account_or_market_services(monkeypatch) -> None:
+    record = AsyncMock(side_effect=AssertionError("paper account mutation must be unreachable"))
+    start = AsyncMock(side_effect=AssertionError("paper run mutation must be unreachable"))
+    fetch = AsyncMock(side_effect=AssertionError("live market fetch must be unreachable"))
+    monkeypatch.setattr(routes_kalshi_paper.paper_service, "record_decision", record)
+    monkeypatch.setattr(routes_kalshi_paper.paper_test_trade_service, "start_run", start)
+    monkeypatch.setattr(routes_kalshi_paper.paper_result_service, "observe_position_result", fetch)
+
+    result = routes_kalshi_paper.evaluate_confirmed_yes_reversal(
+        _confirmed_yes_reversal_request()
+    )
+
+    assert result["selected_count"] == 1
+    record.assert_not_awaited()
+    start.assert_not_awaited()
+    fetch.assert_not_awaited()
+
+
+def test_confirmed_yes_reversal_routes_are_registered_on_paper_router() -> None:
+    paths = {getattr(route, "path", None) for route in routes_kalshi_paper.router.routes}
+    assert "/strategies/confirmed-yes-reversal/specification" in paths
+    assert "/strategies/confirmed-yes-reversal/evaluate" in paths

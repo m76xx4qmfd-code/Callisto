@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+from datetime import datetime
 from decimal import Decimal
+import hashlib
+import json
 from typing import Literal, Self
 
 from fastapi import APIRouter, HTTPException, Query
@@ -27,6 +30,13 @@ from services.kalshi_paper_test_trade_service import (
     KalshiPaperTestRunTransition,
     KalshiPaperTestTradeService,
 )
+from services.kalshi_strategies.confirmed_yes_reversal import (
+    ConfirmedYesReversalCandle,
+    ConfirmedYesReversalMarket,
+    ConfirmedYesReversalSchedule,
+    ConfirmedYesReversalSettlement,
+    ConfirmedYesReversalStrategy,
+)
 from utils.retry import is_retryable_db_error
 
 router = APIRouter()
@@ -38,6 +48,9 @@ paper_test_trade_service = KalshiPaperTestTradeService(
     paper_service=paper_service,
     market_data_client=KalshiPaperMarketDataClient(),
 )
+confirmed_yes_reversal_strategy = ConfirmedYesReversalStrategy()
+
+_CANDLE_DECIMAL_PATTERN = r"^(?:0|[1-9][0-9]*)(?:\.[0-9]{1,6})?$"
 
 
 class CreatePaperAccountRequest(BaseModel):
@@ -118,10 +131,110 @@ class PaperTestRunRequest(BaseModel):
         return self
 
 
+class ConfirmedYesReversalCandleRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    end_time: datetime
+    yes_bid: StrictStr | None = Field(default=None, pattern=_CANDLE_DECIMAL_PATTERN)
+    yes_ask: StrictStr | None = Field(default=None, pattern=_CANDLE_DECIMAL_PATTERN)
+    volume: StrictStr | None = Field(default=None, pattern=_CANDLE_DECIMAL_PATTERN)
+
+
+class ConfirmedYesReversalScheduleRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    call_start: datetime
+    published_at: datetime
+    observed_at: datetime
+    source_url: StrictStr = Field(..., min_length=1, max_length=2048)
+    source_content_sha256: StrictStr = Field(..., pattern=r"^[0-9a-f]{64}$")
+    supersedes_source_content_sha256: StrictStr | None = Field(
+        default=None, pattern=r"^[0-9a-f]{64}$"
+    )
+
+
+class ConfirmedYesReversalMarketRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    ticker: StrictStr = Field(..., min_length=1, max_length=200)
+    market_open: datetime
+    market_close: datetime
+    candles: list[ConfirmedYesReversalCandleRequest] = Field(..., min_length=1)
+    settlement: "ConfirmedYesReversalSettlementRequest | None" = None
+
+
+class ConfirmedYesReversalSettlementRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    result: Literal["yes", "no"]
+    observed_at: datetime
+    source_url: StrictStr = Field(..., min_length=1, max_length=2048)
+    evidence_sha256: StrictStr = Field(..., pattern=r"^[0-9a-f]{64}$")
+    final: Literal[True]
+
+
+class ConfirmedYesReversalEvaluationRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schedule: ConfirmedYesReversalScheduleRequest
+    markets: list[ConfirmedYesReversalMarketRequest] = Field(..., min_length=1, max_length=500)
+
+
 def _handle_db_error(exc: OperationalError) -> None:
     if is_retryable_db_error(exc):
         raise HTTPException(status_code=503, detail="Database is busy; please retry.") from exc
     raise exc
+
+
+@router.get("/strategies/confirmed-yes-reversal/specification")
+def get_confirmed_yes_reversal_specification():
+    return confirmed_yes_reversal_strategy.specification()
+
+
+@router.post("/strategies/confirmed-yes-reversal/evaluate")
+def evaluate_confirmed_yes_reversal(request: ConfirmedYesReversalEvaluationRequest):
+    canonical_request = json.dumps(
+        request.model_dump(mode="json"),
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+    )
+    request_sha256 = hashlib.sha256(canonical_request.encode("utf-8")).hexdigest()
+    try:
+        schedule = ConfirmedYesReversalSchedule(**request.schedule.model_dump())
+        markets = tuple(
+            ConfirmedYesReversalMarket(
+                ticker=market.ticker,
+                market_open=market.market_open,
+                market_close=market.market_close,
+                settlement=(
+                    ConfirmedYesReversalSettlement(**market.settlement.model_dump())
+                    if market.settlement is not None
+                    else None
+                ),
+                candles=tuple(
+                    ConfirmedYesReversalCandle(**candle.model_dump()) for candle in market.candles
+                ),
+            )
+            for market in request.markets
+        )
+        decisions = confirmed_yes_reversal_strategy.evaluate_markets(
+            schedule=schedule,
+            markets=markets,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    serialized = [decision.to_dict() for decision in decisions]
+    selected_count = sum(decision.decision == "selected" for decision in decisions)
+    return {
+        "schema_version": "confirmed-yes-reversal-evaluation/v1",
+        "request_sha256": request_sha256,
+        "strategy": confirmed_yes_reversal_strategy.specification(),
+        "selected_count": selected_count,
+        "abstained_count": len(decisions) - selected_count,
+        "decisions": serialized,
+    }
 
 
 @router.post("/accounts")
